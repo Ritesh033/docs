@@ -8,6 +8,7 @@ export function h(tag, attrs = {}, ...kids) {
     if (v == null || v === false) continue
     if (k.startsWith('on') && typeof v === 'function') el.addEventListener(k.slice(2), v)
     else if (k === 'class') el.className = v
+    else if (k === 'style' && typeof v === 'object') Object.assign(el.style, v) // CSSOM is CSP-safe; style="..." attributes are not
     else if (v === true) el.setAttribute(k, '')
     else el.setAttribute(k, v)
   }

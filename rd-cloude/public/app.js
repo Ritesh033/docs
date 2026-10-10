@@ -115,7 +115,11 @@ const GROUP_ORDER = ['AI', 'Cloud', 'Account']
 // UI plugin modules: public/ui/*.js, each `export default {id,title,group,order,render(el,arg,lib)}` (or an array of those).
 async function loadUiModules() {
   let names = []
-  try { names = (await api('GET', '/api/ui-modules')).modules } catch {}
+  try {
+    const r = await api('GET', '/api/ui-modules')
+    names = r.modules
+    for (const css of r.styles ?? []) document.head.append(h('link', { rel: 'stylesheet', href: '/ui/' + css }))
+  } catch {}
   for (const n of names) {
     try {
       const m = await import('/ui/' + n)

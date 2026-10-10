@@ -70,6 +70,9 @@ export default { id: 'functions', title: 'Functions', group: 'Cloud', order: 50,
 (see `public/lib.js`). **Never** put user-controlled strings in `innerHTML`; build DOM with `h()` or `textContent`. Views must work at 360px width,
 respect `prefers-color-scheme` (use the CSS variables in `style.css`), be keyboard-accessible (real `<button>`/`<label>`s), and show errors via `toast`/inline messages, not `alert()`.
 Re-render with `lib.rerender()`.
+A module may ship `public/ui/<name>.css` (auto-linked by the shell; prefix every class with your module name, e.g. `.fn-editor`). The server will send a strict CSP
+(`script-src 'self'; style-src 'self'`): **no inline `<script>`/`<style>`, no `style="..."` attributes, no `onclick=` attributes**. Set dynamic styles through the CSSOM
+(`el.style.width = ...`, or `h('div', {style: {width: '40%'}})`) or CSS classes; add listeners with `h(tag, {onclick})`. SVG presentation attributes (width, fill, d, ...) are fine.
 
 ## Testing & verification
 

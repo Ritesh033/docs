@@ -53,9 +53,11 @@ export async function createApp({ dataDir, strictModules = process.env.RD_STRICT
   driveRoutes(router, db, ctx)
   billingRoutes(router, db, ctx)
   router.get('/api/health', () => ({ ok: true, name: 'RD Cloude' }), { public: true })
-  router.get('/api/ui-modules', () => ({
-    modules: fs.existsSync(path.join(PUBLIC_DIR, 'ui')) ? fs.readdirSync(path.join(PUBLIC_DIR, 'ui')).filter((f) => f.endsWith('.js')).sort() : [],
-  }), { public: true })
+  router.get('/api/ui-modules', () => {
+    const dir = path.join(PUBLIC_DIR, 'ui')
+    const files = fs.existsSync(dir) ? fs.readdirSync(dir).sort() : []
+    return { modules: files.filter((f) => f.endsWith('.js')), styles: files.filter((f) => f.endsWith('.css')) }
+  }, { public: true })
 
   const loadErrors = []
   if (fs.existsSync(MODULES_DIR)) {
