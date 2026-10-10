@@ -27,3 +27,8 @@ td,th{text-align:left;padding:8px;border-bottom:1px solid var(--line)}
 pre{background:var(--panel);padding:10px;border-radius:6px;overflow:auto}
 .muted{color:var(--muted)}.err{color:#c0392b}
 @media (max-width:640px){#app{grid-template-columns:1fr}nav{flex-direction:row;flex-wrap:wrap}nav small{display:none}main{padding:16px}}
+
+.toasts{position:fixed;right:16px;bottom:16px;display:grid;gap:8px;z-index:100}
+.toast{background:var(--fg);color:var(--bg);padding:8px 14px;border-radius:8px;box-shadow:0 4px 16px #0004}.toast.error{background:#c0392b;color:#fff}
+dialog.modal{border:1px solid var(--line);border-radius:10px;background:var(--bg);color:var(--fg);max-width:420px;width:calc(100% - 32px)}
+dialog.modal::backdrop{background:#0006}dialog.modal input{width:100%}

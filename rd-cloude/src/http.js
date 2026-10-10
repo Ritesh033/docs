@@ -13,7 +13,7 @@ export class Router {
     const re = new RegExp(
       '^' + pattern.replace(/\/\*(\w+)|:(\w+)/g, (m, splat, name) => (keys.push(splat ?? name), splat ? '/(.+)' : '([^/]+)')) + '/?$',
     )
-    this.routes.push({ method, re, keys, handler, public: !!opts.public })
+    this.routes.push({ method, re, keys, handler, pattern, public: !!opts.public, optionalAuth: !!opts.optionalAuth, raw: !!opts.raw, stream: !!opts.stream, meta: opts.meta ?? null })
   }
   get = (p, h, o) => this.add('GET', p, h, o)
   post = (p, h, o) => this.add('POST', p, h, o)
@@ -33,6 +33,9 @@ export class Router {
     return null
   }
 }
+
+// Return this from a handler that wrote the response itself (e.g. SSE streaming).
+export const HANDLED = Symbol('handled')
 
 export const MAX_BODY = 25 * 1024 * 1024
 
@@ -65,6 +68,12 @@ export function sendJson(res, status, body) {
   const out = JSON.stringify(body)
   res.writeHead(status, { 'content-type': 'application/json; charset=utf-8', 'content-length': Buffer.byteLength(out) })
   res.end(out)
+}
+
+export function sendText(res, status, text, type = 'text/plain; charset=utf-8', extra = {}) {
+  const buf = Buffer.from(text)
+  res.writeHead(status, { 'content-type': type, 'content-length': buf.length, ...extra })
+  res.end(buf)
 }
 
 export function sendBuffer(res, status, buf, type = 'application/octet-stream', extra = {}) {

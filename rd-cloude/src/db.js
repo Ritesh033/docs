@@ -39,29 +39,29 @@ export function createDb(dataDir) {
     flush,
     insert(col, doc) {
       const row = { id: doc.id ?? id(col.slice(0, 3)), createdAt: new Date().toISOString(), ...doc }
-      data[col].push(row)
+      ;(data[col] ??= []).push(row)
       save()
       return row
     },
-    get: (col, rid) => data[col].find((r) => r.id === rid) ?? null,
-    find: (col, pred = () => true) => data[col].filter(pred),
-    findOne: (col, pred) => data[col].find(pred) ?? null,
+    get: (col, rid) => (data[col] ??= []).find((r) => r.id === rid) ?? null,
+    find: (col, pred = () => true) => (data[col] ??= []).filter(pred),
+    findOne: (col, pred) => (data[col] ??= []).find(pred) ?? null,
     update(col, rid, patch) {
-      const row = data[col].find((r) => r.id === rid)
+      const row = (data[col] ??= []).find((r) => r.id === rid)
       if (!row) return null
       Object.assign(row, patch, { updatedAt: new Date().toISOString() })
       save()
       return row
     },
     remove(col, rid) {
-      const i = data[col].findIndex((r) => r.id === rid)
+      const i = (data[col] ??= []).findIndex((r) => r.id === rid)
       if (i < 0) return false
       data[col].splice(i, 1)
       save()
       return true
     },
     removeWhere(col, pred) {
-      const before = data[col].length
+      const before = (data[col] ??= []).length
       data[col] = data[col].filter((r) => !pred(r))
       save()
       return before - data[col].length

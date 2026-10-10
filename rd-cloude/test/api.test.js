@@ -15,7 +15,7 @@ const call = async (method, path, { body, raw, headers = {}, auth = token } = {}
 
 before(async () => {
   delete process.env.ANTHROPIC_API_KEY
-  ;({ server } = createApp())
+  ;({ server } = await createApp())
   await new Promise((r) => server.listen(0, r))
   base = `http://localhost:${server.address().port}`
   const r = await call('POST', '/api/auth/register', { body: { email: 'a@rd.dev', password: 'password123' }, auth: null })

@@ -1,33 +1,12 @@
+import { lib, h, api, act, download, promptDialog, state, toast } from '/lib.js'
+
 const $ = (s) => document.querySelector(s)
-let token = localStorage.getItem('rd_token')
 let mode = 'login'
 
-// All dynamic text goes through h()/text nodes - never innerHTML with user data.
-function h(tag, attrs = {}, ...kids) {
-  const el = document.createElement(tag)
-  for (const [k, v] of Object.entries(attrs)) k.startsWith('on') ? el.addEventListener(k.slice(2), v) : el.setAttribute(k, v)
-  el.append(...kids.flat().filter((x) => x != null))
-  return el
-}
+function logout() { localStorage.removeItem('rd_token'); state.token = null; boot() }
 
-async function api(method, path, body, opts = {}) {
-  const res = await fetch(path, {
-    method,
-    headers: { ...(token ? { authorization: `Bearer ${token}` } : {}), ...(body && !opts.raw ? { 'content-type': 'application/json' } : {}) },
-    body: opts.raw ? body : body ? JSON.stringify(body) : undefined,
-  })
-  if (res.status === 401 && token) return logout()
-  const data = res.headers.get('content-type')?.includes('json') ? await res.json() : await res.blob()
-  if (!res.ok) throw new Error(data.error || res.statusText)
-  return data
-}
-const act = (fn) => async (e) => { try { await fn(e) } catch (err) { alert(err.message) } }
-function download(blob, name) { const a = h('a', { href: URL.createObjectURL(blob), download: name }); a.click() }
-
-function logout() { localStorage.removeItem('rd_token'); token = null; boot() }
-
-// ---------- views ----------
-const views = {
+// ---------- built-in views (can be overridden by public/ui/*.js modules with the same id) ----------
+const builtinRenderers = {
   async chat(el, arg) {
     const { conversations } = await api('GET', '/api/conversations')
     let current = arg
@@ -107,14 +86,14 @@ const views = {
     el.append(h('h1', {}, 'Drive'), h('div', { class: 'row' }, file, h('button', { onclick: act(async () => { const f = file.files[0]; if (!f) return; await api('PUT', `/api/drive/files?name=${encodeURIComponent(f.name)}`, f, { raw: true }); route() }) }, 'Upload')),
       h('table', {}, ...files.map((f) => h('tr', {}, h('td', {}, f.name), h('td', {}, `v${f.versionCount} · ${f.size} B`),
         h('td', {}, h('button', { class: 'sec', onclick: act(async () => download(await api('GET', `/api/drive/files/${f.id}`), f.name)) }, 'Download'), ' ',
-          h('button', { class: 'sec', onclick: act(async () => { const s = await api('POST', `/api/drive/files/${f.id}/share`); prompt('Share link', location.origin + s.url) }) }, 'Share'), ' ',
+          h('button', { class: 'sec', onclick: act(async () => { const s = await api('POST', `/api/drive/files/${f.id}/share`); await promptDialog('Share link', location.origin + s.url, { readonly: true }) }) }, 'Share'), ' ',
           h('button', { class: 'sec', onclick: act(async () => { await api('DELETE', `/api/drive/files/${f.id}`); route() }) }, 'Delete'))))))
   },
   async keys(el) {
     const { keys } = await api('GET', '/api/keys')
     const name = h('input', { placeholder: 'Key name' })
     el.append(h('h1', {}, 'API keys'), h('p', { class: 'muted' }, 'Use as: Authorization: Bearer rdk_…'),
-      h('div', { class: 'row' }, name, h('button', { onclick: act(async () => { const r = await api('POST', '/api/keys', { name: name.value }); prompt('Copy your key now — it will not be shown again', r.secret); route() }) }, 'Create key')),
+      h('div', { class: 'row' }, name, h('button', { onclick: act(async () => { const r = await api('POST', '/api/keys', { name: name.value }); await promptDialog('Copy your key now — it will not be shown again', r.secret, { readonly: true }); route() }) }, 'Create key')),
       h('table', {}, ...keys.filter((k) => !k.revoked).map((k) => h('tr', {}, h('td', {}, k.name), h('td', {}, `${k.prefix}…`), h('td', {}, h('button', { class: 'sec', onclick: act(async () => { await api('DELETE', `/api/keys/${k.id}`); route() }) }, 'Revoke'))))))
   },
   async usage(el) {
@@ -125,23 +104,57 @@ const views = {
   },
 }
 
-async function route() {
-  const [name, arg] = (location.hash.slice(1) || 'chat').split('/')
-  document.querySelectorAll('nav a').forEach((a) => a.classList.toggle('on', a.hash === `#${name}`))
-  const el = $('#view'); el.replaceChildren()
-  try { await (views[name] ?? views.chat)(el, arg) } catch (e) { el.append(h('p', { class: 'err' }, e.message)) }
+const BUILTIN = [
+  ['chat', 'Chat', 'AI', 10], ['projects', 'Projects', 'AI', 20], ['artifacts', 'Artifacts', 'AI', 30],
+  ['compute', 'Compute', 'Cloud', 10], ['storage', 'Storage', 'Cloud', 20], ['database', 'Database', 'Cloud', 30], ['drive', 'Drive', 'Cloud', 40],
+  ['keys', 'API keys', 'Account', 10], ['usage', 'Usage & billing', 'Account', 20],
+]
+const registry = new Map(BUILTIN.map(([id, title, group, order]) => [id, { id, title, group, order, render: builtinRenderers[id] }]))
+const GROUP_ORDER = ['AI', 'Cloud', 'Account']
+
+// UI plugin modules: public/ui/*.js, each `export default {id,title,group,order,render(el,arg,lib)}` (or an array of those).
+async function loadUiModules() {
+  let names = []
+  try { names = (await api('GET', '/api/ui-modules')).modules } catch {}
+  for (const n of names) {
+    try {
+      const m = await import('/ui/' + n)
+      for (const v of [m.default].flat().filter(Boolean)) registry.set(v.id, { order: 100, group: 'Cloud', ...v })
+    } catch (e) { console.error('UI module failed:', n, e) }
+  }
 }
 
+function buildNav() {
+  const nav = $('#nav'); nav.replaceChildren(h('h2', {}, 'RD Cloude'))
+  const groups = [...new Set([...GROUP_ORDER, ...[...registry.values()].map((v) => v.group)])]
+  for (const g of groups) {
+    const items = [...registry.values()].filter((v) => v.group === g && !v.hidden).sort((a, b) => a.order - b.order || a.title.localeCompare(b.title))
+    if (!items.length) continue
+    if (g !== 'AI') nav.append(h('small', {}, g))
+    items.forEach((v) => nav.append(h('a', { href: `#${v.id}` }, v.title)))
+  }
+  nav.append(h('button', { id: 'logout', class: 'link', onclick: () => api('POST', '/api/auth/logout').finally(logout) }, 'Sign out'))
+}
+
+async function route() {
+  const [name, ...rest] = (location.hash.slice(1) || 'chat').split('/')
+  const arg = rest.join('/') || undefined
+  document.querySelectorAll('#nav a').forEach((a) => a.classList.toggle('on', a.hash === `#${name}`))
+  const el = $('#view'); el.replaceChildren()
+  const view = registry.get(name) ?? registry.get('chat')
+  try { await view.render(el, arg, lib) } catch (e) { el.append(h('p', { class: 'err' }, e.message)) }
+}
+window.addEventListener('rd:rerender', route)
+
 async function boot() {
-  $('#auth').hidden = !!token; $('#app').hidden = !token
-  if (token) route()
+  $('#auth').hidden = !!state.token; $('#app').hidden = !state.token
+  if (state.token) { await loadUiModules(); buildNav(); route() }
 }
 $('#toggleMode').onclick = () => { mode = mode === 'login' ? 'register' : 'login'; $('#authForm button[type=submit]').textContent = mode === 'login' ? 'Sign in' : 'Create account'; $('#toggleMode').textContent = mode === 'login' ? 'Create an account' : 'Have an account? Sign in' }
 $('#authForm').onsubmit = async (e) => {
   e.preventDefault(); const f = new FormData(e.target)
-  try { const r = await api('POST', `/api/auth/${mode}`, { email: f.get('email'), password: f.get('password') }); token = r.token; localStorage.setItem('rd_token', token); boot() }
+  try { const r = await api('POST', `/api/auth/${mode}`, { email: f.get('email'), password: f.get('password') }); state.token = r.token; localStorage.setItem('rd_token', r.token); boot() }
   catch (err) { $('#authErr').textContent = err.message }
 }
-$('#logout').onclick = () => api('POST', '/api/auth/logout').finally(logout)
 addEventListener('hashchange', route)
 boot()

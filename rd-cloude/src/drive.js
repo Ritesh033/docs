@@ -23,7 +23,7 @@ export function driveRoutes(r, db) {
     const type = req.headers['content-type'] || 'application/octet-stream'
     if (existing) return [200, view(db.update('files', existing.id, { versions: [...existing.versions, ver], contentType: type }))]
     return [201, view(db.insert('files', { userId: user.id, name, contentType: type, versions: [ver] }))]
-  })
+  }, { raw: true })
   r.get('/api/drive/files/:id', ({ user, params, query }) => {
     const f = file(user, params.id)
     const n = query.get('version') ? Number(query.get('version')) : f.versions.length
