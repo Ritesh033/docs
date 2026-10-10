@@ -1,0 +1,36 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>RD Cloude</title>
+<link rel="icon" href="data:,">
+<link rel="stylesheet" href="/style.css">
+</head>
+<body>
+<div id="auth" hidden>
+  <form id="authForm">
+    <h1>RD Cloude</h1>
+    <p class="muted">AI assistant, cloud infrastructure and drive in one place.</p>
+    <input name="email" type="email" placeholder="Email" required>
+    <input name="password" type="password" placeholder="Password (8+ chars)" required minlength="8">
+    <button type="submit" data-mode="login">Sign in</button>
+    <button type="button" id="toggleMode" class="link">Create an account</button>
+    <p id="authErr" class="err"></p>
+  </form>
+</div>
+<div id="app" hidden>
+  <nav>
+    <h2>RD Cloude</h2>
+    <a href="#chat">Chat</a><a href="#projects">Projects</a><a href="#artifacts">Artifacts</a>
+    <small>Cloud</small>
+    <a href="#compute">Compute</a><a href="#storage">Storage</a><a href="#database">Database</a><a href="#drive">Drive</a>
+    <small>Account</small>
+    <a href="#keys">API keys</a><a href="#usage">Usage &amp; billing</a>
+    <button id="logout" class="link">Sign out</button>
+  </nav>
+  <main id="view"></main>
+</div>
+<script type="module" src="/app.js"></script>
+</body>
+</html>

@@ -1,0 +1,12 @@
+{
+  "name": "rd-cloude",
+  "version": "0.1.0",
+  "description": "RD Cloude - AI assistant, cloud infrastructure and drive in one platform (zero dependencies)",
+  "type": "module",
+  "private": true,
+  "engines": { "node": ">=20" },
+  "scripts": {
+    "start": "node server.js",
+    "test": "node --test test/*.test.js"
+  }
+}
