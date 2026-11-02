@@ -50,6 +50,7 @@ async function render(el, _arg, lib) {
       ['#keys', 'keys', 'API keys', 'Scoped keys for the API and CLI'],
       ['#usage', 'usage', 'Usage & billing', 'Plan, quotas, budgets, invoices'],
       ['#team', 'team', 'Team', 'Organizations, members and roles'],
+      ['/docs.html', 'prompts', 'API reference', 'Every endpoint with curl examples (OpenAPI at /api/openapi.json)'],
     ].map(([href, ico, label, hint]) => h('li', {}, h('a', { href }, icon(ico), h('span', {}, h('b', {}, label), h('small', {}, hint)))))))
 
   el.append(h('div', { class: 'page-head' }, h('h1', {}, 'Settings')), h('div', { class: 'set-grid' }, profile, appearance, shortcuts, links))

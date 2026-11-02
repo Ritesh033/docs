@@ -1110,6 +1110,7 @@ export async function register(r, db, ctx) {
     /** Blob ids of everything this module stores. Any blob garbage collector MUST treat these as referenced (db.gcBlobs((id) => storage.referencedBlobIds().has(id))). */
     isReferenced: (id) => referencedBlobIds().has(id),
   }
+  ctx.blobRefs?.set?.('storage', referencedBlobIds)
 
   for (const b of db.find('buckets', (x) => x.deleting)) purgeBucket(b)
   const timers = []

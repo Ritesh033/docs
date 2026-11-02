@@ -88,6 +88,28 @@ export async function createApp({ dataDir, strictModules = process.env.RD_STRICT
   }
   ctx.loadErrors = loadErrors
 
+  // Blob garbage collection. Fails closed: it refuses to run when a module failed to load or a known blob owner has not registered its
+  // references, because deleting "unreferenced" blobs that merely belong to a module that is not running would destroy user data.
+  const BLOB_OWNERS = ['drive', 'storage', 'ai']
+  ctx.gcBlobs = ({ dryRun = true, graceMs } = {}) => {
+    if (loadErrors.length) throw new Error(`blob GC refused: module(s) failed to load (${loadErrors.map((e) => e.module).join(', ')})`)
+    const missing = BLOB_OWNERS.filter((o) => !ctx.blobRefs.has(o))
+    if (missing.length) throw new Error(`blob GC refused: no blob references registered by ${missing.join(', ')}`)
+    const refs = new Set()
+    for (const [name, provider] of ctx.blobRefs) {
+      try { for (const id of provider()) refs.add(id) } catch (e) { throw new Error(`blob GC refused: reference provider "${name}" failed: ${e.message}`) }
+    }
+    return db.gcBlobs((id) => refs.has(id), { dryRun, ...(graceMs !== undefined ? { graceMs } : {}) })
+  }
+  const gcHours = Number(process.env.RD_BLOB_GC_HOURS ?? 0)
+  if (gcHours > 0 && Number.isFinite(gcHours)) {
+    const t = setInterval(() => {
+      try { const r = ctx.gcBlobs({ dryRun: false }); if (r.removed) console.log(`[rd-cloude] blob GC removed ${r.removed} blob(s), ${r.removedBytes} bytes`) } catch (e) { console.error(`[rd-cloude] ${e.message}`) }
+    }, gcHours * 3_600_000)
+    t.unref?.()
+    events.on('shutdown', () => clearInterval(t))
+  }
+
   const server = http.createServer(async (req, res) => {
     const started = process.hrtime.bigint()
     const requestId = req.headers['x-request-id']?.toString().slice(0, 64) || crypto.randomUUID()

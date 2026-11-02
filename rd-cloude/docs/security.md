@@ -228,22 +228,14 @@ Events added: `audit`, `account.export`, `account.deleting`, `account.deleted`, 
 `ctx` gains `mailer`, `audit`, `access`, `scopes`, `scopeRules`, `csp`, `cspExtras`; `hooks` gains `onRequest`. Collections: `auth_tokens`, `org_orgs`, `org_members`, `org_invites`,
 `audit_log`, `audit_state`; `users`, `sessions`, `apiKeys` gained fields (`emailVerified`, `totp`, `recoveryCodes`, `knownDevices`, `lastSeenAt`, `scopes`, `expiresAt`...).
 
-## Changes this area needs in files it does not own
+## Changes this area needed in files it does not own (all applied)
 
-Everything works without them (tests pass on the current tree); with them the gaps listed under "limitations" close.
-
-1. `src/app.js` - **early hook** so that *every* response (401, 404, 429, static files) carries the security headers:
-   `hooks = { onRequest: [], beforeRoute: [], onRequestEnd: [] }` and, right after `rc` is built, `for (const fn of hooks.onRequest) { try { fn(rc) } catch (e) { console.error(...) } }`.
-   The module detects the call and stops serving HTML itself. Verified on a scratch copy: console + `browser-check` still pass.
-2. `src/app.js` - `new URL(req.url, ...)` runs outside the `try`: a request line like `GET // HTTP/1.1` rejects the handler (stack trace in the log, the client waits until it times out).
-   Wrap it and answer `400`. Also key the per-IP rate limiter on `clientIp(req)` from `src/auth.js` (honours `RD_TRUST_PROXY`) instead of `req.socket.remoteAddress`,
-   otherwise every visitor behind a reverse proxy shares one 300 req/min bucket.
-3. `src/http.js` - `Router.match` throws `URIError` for `%E0%A4%A` (500 + stack). `security.js` intercepts this in its `match` wrapper; fixing it at the source is cleaner.
-4. `public/lib.js` + `public/app.js` - the console sign-in form cannot do the second step of 2FA login: `api()` should attach `err.status` / `err.data` to the thrown `Error`, and the
-   form should, on `err.data?.twoFactorRequired`, ask for the code and `POST /api/auth/login/2fa {challenge, code}`. Until then the 401 message points users to `/auth/account#mode=signin`.
-5. `docs/ARCHITECTURE.md` - registry entries: events `audit`, `account.export`, `account.deleting`, `account.deleted`, `org.created|deleted`, `org.member.added|removed|role_changed`;
-   `ctx` fields `mailer`, `audit`, `access`, `scopes`, `scopeRules`, `csp`, `cspExtras`; `hooks.onRequest`; auth-owned collections `auth_tokens`, `org_*`, `audit_*`.
-6. Deployment: set `NODE_ENV=production` (blocks weak passwords), `RD_SECRET_KEY`, `RD_PUBLIC_URL`, `RD_TRUST_PROXY` (behind a proxy) and `RD_SMTP_URL` + `RD_MAIL_FROM`.
+1. `src/app.js` — early `hooks.onRequest` so every response (401, 404, 429, static files) carries the security headers. Verified with `curl -i` against a 404, a 401 and static files.
+2. `src/app.js` — a malformed request line (`GET //`, bad percent-encoding in the URL) answers `400` instead of rejecting the handler; the per-IP rate limiter is keyed on `clientIp(req)` (honours `RD_TRUST_PROXY`) so visitors behind a proxy do not share one bucket.
+3. `src/http.js` — `Router.match` answers `400` for malformed `%` sequences instead of throwing `URIError`.
+4. `public/lib.js` + `public/app.js` — the sign-in form performs the second 2FA step (`api()` attaches `err.status` / `err.data`; on `twoFactorRequired` the form asks for the code and posts `/api/auth/login/2fa`).
+5. `docs/ARCHITECTURE.md` — registry entries for the events, `ctx` fields, `hooks.onRequest` and auth-owned collections.
+6. Deployment checklist: `NODE_ENV=production` (blocks weak passwords), `RD_SECRET_KEY`, `RD_PUBLIC_URL`, `RD_TRUST_PROXY` (behind a proxy) and `RD_SMTP_URL` + `RD_MAIL_FROM`. See the README's production section.
 
 ## Security notes and honest limitations
 
@@ -256,4 +248,4 @@ Everything works without them (tests pass on the current tree); with them the ga
 * No QR code for 2FA enrolment (manual key + `otpauth://` link only), no WebAuthn, no SSO/SAML, no per-org audit log.
 * The audit key lives with the data: an attacker with full control of the data directory can forge a chain. Entries of a deleted account are deleted with it.
 * Organization sharing is not adopted by any service yet; keys cannot be scoped to an organization.
-* `X-Forwarded-For` is trusted only with `RD_TRUST_PROXY`; the app's own per-IP rate limiter uses the raw socket address (see Integration requests in the report).
+* `X-Forwarded-For` is trusted only with `RD_TRUST_PROXY`; the app's per-IP rate limiter uses the same `clientIp()`.

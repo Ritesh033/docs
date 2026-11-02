@@ -712,6 +712,10 @@ const tagEsc = (s, tag) => String(s).replace(new RegExp(`</${tag}`, 'gi'), `<\\/
 export function aiRoutes(r, db, ctx = {}) {
   const events = ctx.events
   const rowsBy = (col, field, value) => (typeof db.findBy === 'function' ? db.findBy(col, field, value) : db.find(col, (x) => x[field] === value))
+  // Image attachments live in blobs referenced from message rows (see ctx.gcBlobs in src/app.js).
+  ctx.blobRefs?.set?.('ai', function* () {
+    for (const m of db.find('messages', () => true)) for (const a of m.attachments ?? []) if (a.blobId) yield a.blobId
+  })
   const ownRow = (col, id, user, label = 'Item') => {
     const row = typeof id === 'string' ? db.get(col, id) : null
     if (!row || row.userId !== user.id) throw new HttpError(404, `${label} not found`)

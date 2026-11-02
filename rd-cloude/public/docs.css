@@ -1,0 +1,23 @@
+/* API reference page (docs.html). Tokens come from style.css. */
+.dc-top { display: flex; align-items: center; gap: 14px; padding: 10px 20px; border-bottom: 1px solid var(--line); position: sticky; top: 0; background: var(--bg); z-index: 10 }
+.dc-brand { display: flex; align-items: center; gap: 8px; font-weight: 700; color: var(--fg); text-decoration: none }
+.dc-sp { flex: 1 }
+.dc-wrap { display: grid; grid-template-columns: 230px minmax(0, 1fr); gap: 24px; max-width: 1200px; margin: 0 auto; padding: 0 20px }
+.dc-nav { position: sticky; top: 53px; align-self: start; max-height: calc(100vh - 53px); overflow: auto; padding: 16px 0; display: grid; gap: 2px }
+.dc-nav a { display: flex; justify-content: space-between; gap: 8px; padding: 6px 10px; border-radius: 8px; color: var(--fg); text-decoration: none; font-size: 14px }
+.dc-nav a:hover { background: var(--panel) }
+#api-main { padding: 20px 0 60px; min-width: 0 } #api-main:focus { outline: none }
+#dc-filter { width: 100%; margin: 8px 0 16px }
+.dc-group { margin-bottom: 28px } .dc-group h2 { font-size: 18px; border-bottom: 1px solid var(--line); padding-bottom: 6px } .dc-count { font-size: 13px; font-weight: 400 }
+.dc-op { border: 1px solid var(--line); border-radius: 8px; margin: 6px 0; background: var(--bg) }
+.dc-op summary { display: flex; align-items: center; gap: 10px; padding: 8px 12px; cursor: pointer; flex-wrap: wrap; list-style: none }
+.dc-op summary::-webkit-details-marker { display: none }
+.dc-op summary code { overflow-wrap: anywhere }
+.dc-sum { font-size: 13px }
+.dc-body { padding: 0 14px 12px; border-top: 1px solid var(--line) }
+.dc-body pre { font-size: 12.5px; margin: 8px 0 }
+.dc-m { display: inline-block; min-width: 56px; text-align: center; font-size: 11px; font-weight: 700; padding: 3px 6px; border-radius: 6px; color: #fff }
+.dc-get { background: #1d5fa8 } .dc-post { background: #1e7e34 } .dc-put { background: #8a5200 } .dc-patch { background: #6b4fa0 } .dc-delete { background: #b42318 } .dc-head { background: #5f5f66 }
+@media (prefers-color-scheme: dark) { :root:not([data-theme=light]) .dc-get { background: #2f74c0 } :root:not([data-theme=light]) .dc-post { background: #2f8f48 } :root:not([data-theme=light]) .dc-put { background: #a8690d } :root:not([data-theme=light]) .dc-patch { background: #7b5fb8 } :root:not([data-theme=light]) .dc-delete { background: #c8372b } }
+:root[data-theme=dark] .dc-get { background: #2f74c0 } :root[data-theme=dark] .dc-post { background: #2f8f48 } :root[data-theme=dark] .dc-put { background: #a8690d } :root[data-theme=dark] .dc-patch { background: #7b5fb8 } :root[data-theme=dark] .dc-delete { background: #c8372b }
+@media (max-width: 800px) { .dc-wrap { grid-template-columns: minmax(0, 1fr) } .dc-nav { position: static; max-height: none; grid-auto-flow: column; overflow-x: auto; padding: 8px 0 } .dc-nav a { white-space: nowrap } }

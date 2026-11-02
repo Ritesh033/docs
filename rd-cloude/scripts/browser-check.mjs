@@ -77,6 +77,13 @@ if (!noSmoke) {
   await check(async () => !(await page.locator('#nav a').first().isVisible()), 'Esc did not close the mobile drawer')
   await check(async () => (await page.evaluate(() => document.documentElement.scrollWidth <= window.innerWidth + 1)), 'horizontal overflow at 390px on #home')
   await page.setViewportSize({ width: 1280, height: 800 })
+  // API reference page renders the generated OpenAPI description and filters it
+  await page.goto(`${base}/docs.html`)
+  await page.waitForSelector('.dc-op', { timeout: 5000 }).catch(() => problems.push('smoke: docs.html rendered no operations'))
+  const total = await page.locator('.dc-op').count()
+  await check(async () => total > 100, `docs.html lists only ${total} operations`)
+  await page.fill('#dc-filter', 'presign')
+  await check(async () => { const n = await page.locator('.dc-op:not([hidden])').count(); return n > 0 && n < total }, 'docs.html filter did not narrow the list')
 }
 if (shotsDir) {
   const fs = await import('node:fs')
@@ -84,7 +91,7 @@ if (shotsDir) {
   for (const [label, scheme, vp] of [['desktop-light', 'light', { width: 1280, height: 800 }], ['desktop-dark', 'dark', { width: 1280, height: 800 }], ['mobile-light', 'light', { width: 390, height: 844 }], ['mobile-dark', 'dark', { width: 390, height: 844 }]]) {
     await page.emulateMedia({ colorScheme: scheme }); await page.setViewportSize(vp)
     for (const hsh of hashes.length ? hashes : ['#home', '#settings']) {
-      await page.goto(`${base}/${hsh.startsWith('#') ? hsh : '#' + hsh}`); await page.waitForTimeout(600)
+      await page.goto(`${base}/${hsh.startsWith('#') || hsh.startsWith('/') ? hsh.replace(/^\//, '') : '#' + hsh}`); await page.waitForTimeout(600)
       await page.screenshot({ path: `${shotsDir}/${label}-${hsh.replace(/\W/g, '') || 'home'}.png`, fullPage: true })
     }
   }

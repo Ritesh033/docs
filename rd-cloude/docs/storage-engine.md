@@ -101,6 +101,13 @@ db.gcBlobs(isReferenced, { graceMs = 300000, dryRun = false })
   db.gcBlobs((id) => refs.has(id), { dryRun: true })   // inspect `candidates` first
   ```
 
+  **In the app** use `ctx.gcBlobs({ dryRun = true, graceMs })` (src/app.js) instead: it unions the references that every blob owner
+  registers in `ctx.blobRefs` (`drive`, `storage`, `ai`; `sql` registers an empty set) and **refuses to run** when a module failed to load
+  or a known owner has not registered, because it could then delete that module's data. Three ways to run it:
+  `RD_BLOB_GC_HOURS=24` (periodic, off by default), `node scripts/gc-blobs.mjs [<dataDir>] [--apply]` (offline, dry run by default; the
+  data dir lock stops it while the server runs), or call `ctx.gcBlobs` from a module. A module that stores blob ids **must** register
+  `ctx.blobRefs.set('<module>', () => iterableOfBlobIds)` and be added to `BLOB_OWNERS` in `src/app.js`.
+
 ### Lifecycle and operations
 
 ```js

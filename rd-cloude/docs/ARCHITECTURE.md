@@ -105,6 +105,7 @@ A module may ship `public/ui/<name>.css` (auto-linked by the shell; prefix every
 **ctx fields**: `mailer` (`send({to,subject,text,tags})`), `audit(...)`, `access` `{canAccess, orgRole, listOrgIds, require, filter}` (org-shared records carry `{userId, orgId}`; check with `ctx.access.require(userId, row, 'read|write|delete')`, answering 404 on denial),
 `scopes.register(prefix, service)` (API-key scope mapping; unregistered prefixes fall back to global read/write; modules that load before security.js may queue `(ctx.scopeRules ??= []).push([prefix, service])`),
 `csp.add(directive, ...values)`, `ai.registerTool({name, description, input_schema, run})`, `quotas.check(userId, kind, qty)` (optional; billing area), `loadErrors`.
+`blobRefs` (`Map<module, () => iterable of blob ids>`; every module that stores blob ids registers here) and `gcBlobs({dryRun = true, graceMs})` (fail-closed blob garbage collection; see docs/storage-engine.md).
 
 **Public non-API routes**: `/s/:token` (drive shares), `/share/:token` (shared conversations), `/preview/:ticket` (sandboxed artifact previews), `/auth/account` (account pages), `/pub/*` and `/site/*` (storage), `/fn/*` (functions).
 Routes that deliberately serve user HTML must send their own `Content-Security-Policy` via `{ headers }`.
