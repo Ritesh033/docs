@@ -1,6 +1,7 @@
 /* Object storage console. Every class is prefixed st- (see docs/ARCHITECTURE.md "UI modules"). Colours come from the shell's CSS variables. */
 .st-root{--st-ok:#1e7e34;--st-okbg:#e6f4ea;--st-warn:#a85d00;--st-warnbg:#fff1dc;--st-bad:#c0392b;--st-badbg:#fdecea;--st-sel:rgba(217,98,43,.10);contain:inline-size;max-width:100%}
-@media (prefers-color-scheme:dark){.st-root,.st-dialog{--st-ok:#58c27a;--st-okbg:#17301f;--st-warn:#f0a43c;--st-warnbg:#38280f;--st-bad:#ff7b6b;--st-badbg:#3a1a17;--st-sel:rgba(217,98,43,.20)}}
+@media (prefers-color-scheme:dark){:root:not([data-theme=light]) .st-root,:root:not([data-theme=light]) .st-dialog{--st-ok:#58c27a;--st-okbg:#17301f;--st-warn:#f0a43c;--st-warnbg:#38280f;--st-bad:#ff7b6b;--st-badbg:#3a1a17;--st-sel:rgba(217,98,43,.20)}}
+:root[data-theme=dark] .st-root,:root[data-theme=dark] .st-dialog{--st-ok:#58c27a;--st-okbg:#17301f;--st-warn:#f0a43c;--st-warnbg:#38280f;--st-bad:#ff7b6b;--st-badbg:#3a1a17;--st-sel:rgba(217,98,43,.20)}
 .st-dialog{--st-ok:#1e7e34;--st-okbg:#e6f4ea;--st-warn:#a85d00;--st-warnbg:#fff1dc;--st-bad:#c0392b;--st-badbg:#fdecea}
 .st-root :is(button,a,input,select,textarea,summary):focus-visible,.st-dialog :is(button,a,input,select,textarea):focus-visible{outline:2px solid var(--accent);outline-offset:2px}
 .st-root button:disabled,.st-dialog button:disabled{opacity:.5;cursor:not-allowed}
@@ -26,7 +27,7 @@
 .st-subtabs{border-bottom:0;padding-bottom:0;margin-top:0}
 .st-tab,.st-subtab{color:var(--fg);text-decoration:none;padding:6px 12px;border-radius:6px;font-size:14px}
 .st-tab:hover,.st-subtab:hover{background:var(--panel)}
-.st-tab.on,.st-subtab.on{background:var(--accent);color:#fff}
+.st-tab.on,.st-subtab.on{background:var(--accent);color:var(--on-accent,#fff)}
 
 /* cards and forms */
 .st-card{background:var(--panel);border:1px solid var(--line);border-radius:10px;padding:16px;margin:0 0 14px}

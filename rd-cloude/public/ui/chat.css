@@ -4,7 +4,7 @@
 main:has(> .ai-chat) { max-width: none; padding: 0; }
 
 .ai-chat {
-  display: grid; grid-template-columns: 272px minmax(0, 1fr); min-height: 100vh; min-height: 100dvh; position: relative; color: var(--ai-fg);
+  display: grid; grid-template-columns: 272px minmax(0, 1fr); min-height: calc(100vh - var(--topbar-h, 0px)); min-height: calc(100dvh - var(--topbar-h, 0px)); position: relative; color: var(--ai-fg);
   --ai-composer-h: 150px;
 }
 .ai-chat[data-sidebar='drawer'] { grid-template-columns: minmax(0, 1fr); }
@@ -13,7 +13,7 @@ main:has(> .ai-chat) { max-width: none; padding: 0; }
 
 /* ---- sidebar ----------------------------------------------------------------------------------------------- */
 .ai-side {
-  position: sticky; top: 0; align-self: start; height: 100vh; height: 100dvh; display: flex; flex-direction: column; min-height: 0;
+  position: sticky; top: var(--topbar-h, 0px); align-self: start; height: calc(100vh - var(--topbar-h, 0px)); height: calc(100dvh - var(--topbar-h, 0px)); display: flex; flex-direction: column; min-height: 0;
   background: var(--ai-panel); border-right: 1px solid var(--ai-line);
 }
 .ai-side-head { display: flex; align-items: center; gap: 8px; padding: 12px 12px 8px; }
@@ -45,7 +45,7 @@ main:has(> .ai-chat) { max-width: none; padding: 0; }
 .ai-scrim { display: none; }
 
 /* ---- main column ------------------------------------------------------------------------------------------- */
-.ai-main { display: flex; flex-direction: column; min-width: 0; min-height: 100vh; min-height: 100dvh; background: var(--ai-bg); position: relative; }
+.ai-main { display: flex; flex-direction: column; min-width: 0; min-height: calc(100vh - var(--topbar-h, 0px)); min-height: calc(100dvh - var(--topbar-h, 0px)); background: var(--ai-bg); position: relative; }
 .ai-bar { position: sticky; top: 0; z-index: 6; display: flex; align-items: center; gap: 6px; padding: 8px 12px; background: var(--ai-bg); border-bottom: 1px solid var(--ai-line); min-height: 52px; }
 .ai-side-toggle { display: none; }
 .ai-bar-title { flex: 1; min-width: 0; display: flex; align-items: center; gap: 8px; }
@@ -159,7 +159,7 @@ main:has(> .ai-chat) { max-width: none; padding: 0; }
 .ai-jump[hidden] { display: none; }
 
 /* ---- artifact side panel ----------------------------------------------------------------------------------- */
-.ai-panel { position: sticky; top: 0; align-self: start; height: 100vh; height: 100dvh; overflow: hidden; border-left: 1px solid var(--ai-line); background: var(--ai-bg); display: flex; flex-direction: column; min-width: 0; }
+.ai-panel { position: sticky; top: var(--topbar-h, 0px); align-self: start; height: calc(100vh - var(--topbar-h, 0px)); height: calc(100dvh - var(--topbar-h, 0px)); overflow: hidden; border-left: 1px solid var(--ai-line); background: var(--ai-bg); display: flex; flex-direction: column; min-width: 0; }
 .ai-panel[hidden] { display: none; }
 .ai-panel > .ai-av { flex: 1; }
 
@@ -176,12 +176,12 @@ main:has(> .ai-chat) { max-width: none; padding: 0; }
 
 /* ---- responsive: layout modes are set by chat.js (data-sidebar / data-panelmode) ---------------------------- */
 .ai-chat[data-sidebar='drawer'] .ai-side {
-  position: fixed; top: 0; left: 0; bottom: 0; width: min(88vw, 320px); z-index: 50; transform: translateX(-104%); visibility: hidden;
+  position: fixed; top: var(--topbar-h, 0px); left: 0; bottom: 0; width: min(88vw, 320px); z-index: 50; transform: translateX(-104%); visibility: hidden;
   transition: transform 0.2s ease, visibility 0s linear 0.2s; box-shadow: var(--ai-shadow);
 }
 .ai-chat[data-sidebar='drawer'][data-side='open'] .ai-side { transform: none; visibility: visible; transition: transform 0.2s ease; }
 .ai-chat[data-sidebar='drawer'] :is(.ai-side-toggle, .ai-side-close) { display: inline-flex; }
-.ai-chat[data-panelmode='overlay'] .ai-panel { position: fixed; top: 0; right: 0; bottom: 0; width: min(100vw, 760px); z-index: 40; box-shadow: var(--ai-shadow); }
+.ai-chat[data-panelmode='overlay'] .ai-panel { position: fixed; top: var(--topbar-h, 0px); right: 0; bottom: 0; width: min(100vw, 760px); z-index: 40; box-shadow: var(--ai-shadow); }
 .ai-scrim.ai-on { display: block; position: fixed; inset: 0; background: rgba(0, 0, 0, 0.45); z-index: 30; }
 
 @media (max-width: 859px) {

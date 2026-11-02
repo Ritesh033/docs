@@ -1,6 +1,7 @@
 /* Shared chart styling (loaded for every page). Categorical palette is theme-aware. */
 :root{--c0:#d9622b;--c1:#3b82b6;--c2:#4c9f70;--c3:#a05cc6;--c4:#c9a227;--c5:#d1495b;--c6:#2a9d9d;--c7:#7b8794}
-@media (prefers-color-scheme:dark){:root{--c0:#f0884f;--c1:#6aaee0;--c2:#6cc28f;--c3:#c08ae6;--c4:#e5c14c;--c5:#ee7384;--c6:#53c7c7;--c7:#a1acb8}}
+@media (prefers-color-scheme:dark){:root:not([data-theme=light]){--c0:#f0884f;--c1:#6aaee0;--c2:#6cc28f;--c3:#c08ae6;--c4:#e5c14c;--c5:#ee7384;--c6:#53c7c7;--c7:#a1acb8}}
+:root[data-theme=dark]{--c0:#f0884f;--c1:#6aaee0;--c2:#6cc28f;--c3:#c08ae6;--c4:#e5c14c;--c5:#ee7384;--c6:#53c7c7;--c7:#a1acb8}
 .ch{width:100%;height:auto;max-width:720px;display:block;overflow:visible}
 .ch-grid{stroke:var(--line,#ddd);stroke-width:1;fill:none}
 .ch-axis{fill:var(--muted,#777);font:11px system-ui,sans-serif}

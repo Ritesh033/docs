@@ -3,28 +3,75 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="color-scheme" content="light dark">
+<meta name="description" content="RD Cloude: an AI assistant, cloud infrastructure and a drive in one console.">
 <title>RD Cloude</title>
-<link rel="icon" href="data:,">
+<link rel="icon" href="/favicon.svg" type="image/svg+xml">
+<script src="/theme-init.js"></script>
 <link rel="stylesheet" href="/style.css">
 </head>
 <body>
+<a class="skip" href="#view" id="skip">Skip to content</a>
+<div id="offline" role="status" hidden>You are offline or the server is unreachable. Changes cannot be saved until the connection returns.</div>
+
 <div id="auth" hidden>
-  <form id="authForm">
-    <h1>RD Cloude</h1>
-    <p class="muted">AI assistant, cloud infrastructure and drive in one place.</p>
-    <input name="email" type="email" placeholder="Email" autocomplete="username" required>
-    <input name="password" type="password" placeholder="Password (8+ chars)" autocomplete="current-password" required minlength="8">
-    <input name="code" id="codeField" type="text" inputmode="numeric" autocomplete="one-time-code" placeholder="6-digit code or recovery code" hidden>
-    <button type="submit" data-mode="login">Sign in</button>
-    <button type="button" id="toggleMode" class="link">Create an account</button>
-    <a class="link" href="/auth/account#mode=forgot">Forgot password?</a>
-    <p id="authErr" class="err"></p>
-  </form>
+  <section class="hero" aria-labelledby="heroTitle">
+    <div class="brand-lg"><img src="/favicon.svg" alt="" width="36" height="36"> RD Cloude</div>
+    <h1 id="heroTitle">Your AI assistant and your cloud, in one console.</h1>
+    <p class="lead">Chat with an AI agent, run functions and databases, keep files in Drive, and watch costs and health, all from one place.</p>
+    <ul class="feat">
+      <li><b>AI assistant</b>Projects, artifacts, tools and prompts</li>
+      <li><b>Compute &amp; network</b>Instances, volumes, VPCs, load balancers</li>
+      <li><b>Functions</b>Sandboxed serverless code, cron, queues</li>
+      <li><b>Data</b>Document database and managed SQL</li>
+      <li><b>Drive &amp; storage</b>Sharing, versions, buckets, presigned links</li>
+      <li><b>Billing &amp; monitoring</b>Quotas, budgets, alerts, uptime checks</li>
+    </ul>
+    <p class="note">Compute and networking are a simulated control plane: they model real behaviour (state machines, CIDR maths, security-group rules, metering) without starting real machines.</p>
+  </section>
+  <div class="auth-pane">
+    <form id="authForm">
+      <h2 id="authTitle">Sign in</h2>
+      <label>Email
+        <input name="email" type="email" autocomplete="username" required>
+      </label>
+      <label>Password <span class="hint" id="pwHint">(8+ characters)</span>
+        <input name="password" type="password" autocomplete="current-password" required minlength="8">
+      </label>
+      <label id="codeLabel" hidden>Verification code
+        <input name="code" id="codeField" type="text" inputmode="numeric" autocomplete="one-time-code" placeholder="6-digit code or recovery code" hidden>
+      </label>
+      <button type="submit" data-mode="login">Sign in</button>
+      <div class="alt">
+        <button type="button" id="toggleMode" class="link">Create an account</button>
+        <a class="link" href="/auth/account#mode=forgot">Forgot password?</a>
+      </div>
+      <p id="authErr" class="err" role="alert"></p>
+    </form>
+  </div>
 </div>
+
 <div id="app" hidden>
-  <nav id="nav"></nav>
-  <main id="view"></main>
+  <header id="topbar">
+    <button type="button" id="menuBtn" class="ibtn menu-btn" aria-label="Open navigation" aria-controls="nav" aria-expanded="false"></button>
+    <a class="brand" href="#home" aria-label="RD Cloude home"><img src="/favicon.svg" alt="" width="26" height="26"><b>RD Cloude</b></a>
+    <span class="spacer"></span>
+    <button type="button" id="paletteBtn" class="palette-btn" aria-label="Search and commands" aria-haspopup="dialog"></button>
+    <div class="menu-wrap">
+      <button type="button" id="bellBtn" class="ibtn" aria-label="Notifications" aria-haspopup="true" aria-expanded="false" aria-controls="bellPanel"></button>
+      <div id="bellPanel" class="popover" role="region" aria-label="Notifications" hidden></div>
+    </div>
+    <button type="button" id="themeBtn" class="ibtn" aria-label="Theme"></button>
+    <div class="menu-wrap">
+      <button type="button" id="userBtn" class="ibtn" aria-label="Account menu" aria-haspopup="true" aria-expanded="false" aria-controls="userPanel"></button>
+      <div id="userPanel" class="popover" role="menu" aria-label="Account" hidden></div>
+    </div>
+  </header>
+  <div id="scrim" hidden></div>
+  <nav id="nav" aria-label="Primary"></nav>
+  <main id="view" tabindex="-1"></main>
 </div>
+<noscript><p class="err">RD Cloude needs JavaScript enabled.</p></noscript>
 <script type="module" src="/app.js"></script>
 </body>
 </html>

@@ -1,6 +1,7 @@
 /* Organizations view. Every class is prefixed .team- (see docs/ARCHITECTURE.md). */
 .team-root{contain:inline-size;--team-ok:#1e7e34;--team-warn:#a85d00;--team-bad:#c0392b;--team-okbg:#e6f4ea;--team-warnbg:#fff1dc;max-width:860px}
-@media (prefers-color-scheme:dark){.team-root{--team-ok:#58c27a;--team-warn:#f0a43c;--team-bad:#ff7b6b;--team-okbg:#17301f;--team-warnbg:#38280f}}
+@media (prefers-color-scheme:dark){:root:not([data-theme=light]) .team-root{--team-ok:#58c27a;--team-warn:#f0a43c;--team-bad:#ff7b6b;--team-okbg:#17301f;--team-warnbg:#38280f}}
+:root[data-theme=dark] .team-root{--team-ok:#58c27a;--team-warn:#f0a43c;--team-bad:#ff7b6b;--team-okbg:#17301f;--team-warnbg:#38280f}
 .team-card{background:var(--panel);border:1px solid var(--line);border-radius:10px;padding:16px;margin:0 0 14px}
 .team-h{margin:0 0 10px;font-size:17px}
 .team-h3{margin:16px 0 8px;font-size:15px}

@@ -1,0 +1,19 @@
+/* Settings view (ui/settings.js). */
+.set-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(min(100%, 380px), 1fr)); gap: 16px; align-items: start }
+.set-card { background: var(--bg); border: 1px solid var(--line); border-radius: 12px; padding: 16px; display: grid; gap: 8px; min-width: 0 }
+.set-card h2 { margin: 0 0 4px; font-size: 16px }
+.set-card label { font-weight: 600; font-size: 13px }
+.set-themes { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 8px }
+.set-theme { display: grid; gap: 2px; justify-items: start; text-align: left; background: var(--panel); color: var(--fg); border: 2px solid var(--line); border-radius: 10px; padding: 12px }
+.set-theme:hover:not(:disabled) { background: var(--panel-2); border-color: var(--line) }
+.set-theme.on, .set-theme.on:hover:not(:disabled) { border-color: var(--accent); background: var(--accent-soft) }
+.set-theme svg { width: 20px; height: 20px; stroke: var(--accent); fill: none; stroke-width: 1.8; stroke-linecap: round; stroke-linejoin: round; margin-bottom: 4px }
+.set-theme span { font-size: 12px; color: var(--muted) }
+.set-keys { display: grid; grid-template-columns: auto 1fr; gap: 8px 14px; margin: 0; align-items: baseline }
+.set-keys dt { white-space: nowrap } .set-keys dd { margin: 0; color: var(--muted); font-size: 14px }
+.set-links { list-style: none; margin: 0; padding: 0; display: grid; gap: 4px }
+.set-links a { display: flex; align-items: center; gap: 12px; padding: 8px 10px; border-radius: 8px; text-decoration: none; color: var(--fg) }
+.set-links a:hover { background: var(--panel) }
+.set-links svg { width: 20px; height: 20px; stroke: var(--accent); fill: none; stroke-width: 1.8; stroke-linecap: round; stroke-linejoin: round; flex: none }
+.set-links span { display: grid } .set-links small { color: var(--muted); font-size: 13px }
+@media (max-width: 420px) { .set-themes { grid-template-columns: minmax(0, 1fr) } }

@@ -18,7 +18,23 @@ export function h(tag, attrs = {}, ...kids) {
 
 /** JSON/raw fetch against the API. Throws Error(message) on non-2xx. opts: {raw, headers, signal, response} */
 export async function api(method, path, body, opts = {}) {
-  const res = await fetch(path, {
+  let res
+  try { res = await rawFetch(method, path, body, opts) } catch (e) {
+    if (e?.name === 'AbortError') throw e
+    setNet(false)
+    const err = new Error('Network error - check your connection and try again')
+    err.network = true
+    throw err
+  }
+  if (opts.response) return res
+  return finish(res, path)
+}
+
+let netOk = true
+function setNet(ok) { if (ok !== netOk) { netOk = ok; window.dispatchEvent(new CustomEvent('rd:network', { detail: { ok } })) } }
+
+const rawFetch = (method, path, body, opts) =>
+  fetch(path, {
     method,
     signal: opts.signal,
     headers: {
@@ -28,12 +44,14 @@ export async function api(method, path, body, opts = {}) {
     },
     body: body === undefined ? undefined : opts.raw ? body : JSON.stringify(body),
   })
-  if (opts.response) return res
+
+async function finish(res, path) {
   if (res.status === 401 && state.token && !path.startsWith('/api/auth/')) {
     localStorage.removeItem('rd_token')
     location.reload()
     throw new Error('Session expired')
   }
+  setNet(true)
   const isJson = /(^|[/+])json\b/.test(res.headers.get('content-type') ?? '') // application/json, +json; not x-ndjson
   const data = isJson ? await res.json() : await res.blob()
   if (!res.ok) {
@@ -84,8 +102,67 @@ export const promptDialog = (message, value = '', opts = {}) =>
     setTimeout(() => input.select(), 0)
   })
 
+// ---- additive presentation helpers (all DOM-built; safe for user data) ----------------------------------------
+/** Small status pill. kind: ok | warn | bad | info | (none). */
+export const badge = (text, kind = '') => h('span', { class: `badge ${kind}`.trim() }, text)
+/** Friendly empty state: emptyState('No buckets yet', 'Create one to store files.', actionButtonOrNull). */
+export const emptyState = (title, hint, action) => h('div', { class: 'empty' }, h('h3', {}, title), hint ? h('p', {}, hint) : null, action ?? null)
+export const spinner = (label = 'Loading') => h('span', { class: 'spinner', role: 'status', 'aria-label': label })
+/** Placeholder block while data loads: skeleton(3) -> three bars; skeleton(1, {height:'80px'}). */
+export const skeleton = (lines = 1, style = {}) => h('div', { 'aria-hidden': 'true' }, ...Array.from({ length: lines }, (_, i) => h('span', { class: 'skeleton', style: { height: '14px', margin: '8px 0', width: i === lines - 1 && lines > 1 ? '60%' : '100%', ...style } })))
+/** Responsive table: table(['Name','Size'], rows, {caption}) where rows are arrays of strings/Nodes. */
+export const table = (headers, rows, opts = {}) =>
+  h('div', { class: 'tbl-wrap' }, h('table', {}, opts.caption ? h('caption', { class: 'sr-only' }, opts.caption) : null,
+    h('thead', {}, h('tr', {}, ...headers.map((x) => h('th', { scope: 'col' }, x)))),
+    h('tbody', {}, ...rows.map((r) => h('tr', {}, ...r.map((c) => h('td', {}, c)))))))
+export const debounce = (fn, ms = 200) => { let t; return (...a) => { clearTimeout(t); t = setTimeout(() => fn(...a), ms) } }
+export const fmtNumber = (n) => (Number.isFinite(n) ? new Intl.NumberFormat().format(n) : '-')
+export const fmtMoney = (n) => (Number.isFinite(n) ? new Intl.NumberFormat(undefined, { style: 'currency', currency: 'USD', maximumFractionDigits: n !== 0 && Math.abs(n) < 1 ? 4 : 2 }).format(n) : '-')
+export const fmtDuration = (ms) => {
+  if (!Number.isFinite(ms)) return '-'
+  const s = Math.floor(ms / 1000)
+  if (s < 1) return `${Math.round(ms)} ms`
+  if (s < 60) return `${s}s`
+  const m = Math.floor(s / 60)
+  if (m < 60) return `${m}m ${s % 60}s`
+  const hrs = Math.floor(m / 60)
+  return hrs < 48 ? `${hrs}h ${m % 60}m` : `${Math.floor(hrs / 24)}d ${hrs % 24}h`
+}
+/** "3 minutes ago" / "in 2 hours". */
+export const fmtRelative = (d) => {
+  const t = typeof d === 'number' ? d : Date.parse(d)
+  if (!Number.isFinite(t)) return ''
+  const diff = (t - Date.now()) / 1000
+  const units = [['year', 31536000], ['month', 2592000], ['day', 86400], ['hour', 3600], ['minute', 60]]
+  const rtf = new Intl.RelativeTimeFormat(undefined, { numeric: 'auto' })
+  for (const [u, sec] of units) if (Math.abs(diff) >= sec) return rtf.format(Math.round(diff / sec), u)
+  return rtf.format(Math.round(diff), 'second')
+}
+/** Copies text; resolves true/false (falls back to a hidden textarea where the async clipboard API is unavailable). */
+export async function copyToClipboard(text) {
+  try { await navigator.clipboard.writeText(text); return true } catch { /* fall through */ }
+  const ta = h('textarea', { 'aria-hidden': 'true', readonly: true, style: { position: 'fixed', opacity: '0', top: '0' } })
+  ta.value = text
+  document.body.append(ta); ta.select()
+  let ok = false
+  try { ok = document.execCommand('copy') } catch { /* unsupported */ }
+  ta.remove()
+  return ok
+}
+
+// ---- theme (shared by the shell's toggle and the Settings view). 'auto' follows the OS; see /theme-init.js ----------
+export function getTheme() {
+  try { const t = localStorage.getItem('rd_theme'); return t === 'light' || t === 'dark' ? t : 'auto' } catch { return 'auto' }
+}
+export function setTheme(t) {
+  const v = t === 'light' || t === 'dark' ? t : 'auto'
+  try { v === 'auto' ? localStorage.removeItem('rd_theme') : localStorage.setItem('rd_theme', v) } catch { /* storage blocked: applies for this page only */ }
+  v === 'auto' ? document.documentElement.removeAttribute('data-theme') : document.documentElement.setAttribute('data-theme', v)
+  window.dispatchEvent(new CustomEvent('rd:theme', { detail: v }))
+}
+
 export const rerender = () => window.dispatchEvent(new Event('rd:rerender'))
 export const fmtBytes = (n) => (n < 1024 ? `${n} B` : n < 1048576 ? `${(n / 1024).toFixed(1)} KB` : n < 1073741824 ? `${(n / 1048576).toFixed(1)} MB` : `${(n / 1073741824).toFixed(2)} GB`)
 export const fmtDate = (d) => (d ? new Date(d).toLocaleString() : '')
 
-export const lib = { h, api, toast, act, download, confirmDialog, promptDialog, rerender, fmtBytes, fmtDate, state }
+export const lib = { h, api, toast, act, download, confirmDialog, promptDialog, rerender, fmtBytes, fmtDate, state, badge, emptyState, spinner, skeleton, table, debounce, fmtNumber, fmtMoney, fmtDuration, fmtRelative, copyToClipboard, getTheme, setTheme }

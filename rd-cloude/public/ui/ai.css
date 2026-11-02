@@ -308,7 +308,7 @@ a.ai-file-name:hover { color: var(--ai-link); text-decoration: underline; }
 .ai-vars { display: flex; flex-wrap: wrap; gap: 6px; align-items: center; }
 
 .ai-art-page { display: grid; grid-template-columns: minmax(240px, 320px) minmax(0, 1fr); gap: 16px; max-width: 1280px; align-items: start; }
-.ai-art-side { position: sticky; top: 0; max-height: 100dvh; overflow: auto; padding-bottom: 16px; }
+.ai-art-side { position: sticky; top: var(--topbar-h, 0px); max-height: calc(100dvh - var(--topbar-h, 0px)); overflow: auto; padding-bottom: 16px; }
 .ai-art-side .ai-row { margin: 8px 0; flex-wrap: nowrap; }
 .ai-art-side .ai-row .ai-input { flex: 1; }
 .ai-art-list { list-style: none; margin: 0 0 8px; padding: 0; display: grid; gap: 4px; }

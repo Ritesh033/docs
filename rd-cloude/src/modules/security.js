@@ -358,7 +358,7 @@ export async function register(r, db, ctx) {
   /* ------------------------------------------------------------- standalone page for reset / verify links */
   const PAGE = `<!doctype html>
 <html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">
-<title>RD Cloude account</title><link rel="icon" href="data:,"><link rel="stylesheet" href="/style.css"><link rel="stylesheet" href="/ui/security.css"></head>
+<title>RD Cloude account</title><link rel="icon" href="/favicon.svg" type="image/svg+xml"><script src="/theme-init.js"></script><link rel="stylesheet" href="/style.css"><link rel="stylesheet" href="/ui/security.css"></head>
 <body><main id="root" class="sec-page"></main><script type="module" src="/auth/account.js"></script></body></html>`
   // a second link opened in the same tab only changes the hash, so the page re-mounts itself on hashchange
   const PAGE_JS = [
