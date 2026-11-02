@@ -1295,7 +1295,8 @@ describe('AI HTTP API: attachments, providers, quotas, context', () => {
   describe('quotas and metering', () => {
     test('ctx.quotas.check is consulted when present and never required', async () => {
       const c = await newConvo()
-      assert.equal(ctx.quotas, undefined)
+      const realQuotas = ctx.quotas // the billing module installs the real engine; this test swaps in fakes
+      ctx.quotas = undefined
       assert.equal((await send(c.id, 'works without quotas')).status, 201)
       const calls = []
       ctx.quotas = { check: async (...a) => { calls.push(a); return { allowed: false, message: 'Over the limit' } } }
@@ -1313,7 +1314,7 @@ describe('AI HTTP API: attachments, providers, quotas, context', () => {
         assert.equal((await send(c.id, 'allowed')).status, 201)
         ctx.quotas = { check: () => ({ allowed: true }) }
         assert.equal((await send(c.id, 'allowed sync')).status, 201)
-      } finally { delete ctx.quotas }
+      } finally { ctx.quotas = realQuotas }
     })
     test('built-in daily output token limit (RD_AI_DAILY_OUTPUT_TOKENS)', async () => {
       const u = await t.register('limited@rd.dev')

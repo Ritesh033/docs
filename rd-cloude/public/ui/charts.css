@@ -1,0 +1,18 @@
+/* Shared chart styling (loaded for every page). Categorical palette is theme-aware. */
+:root{--c0:#d9622b;--c1:#3b82b6;--c2:#4c9f70;--c3:#a05cc6;--c4:#c9a227;--c5:#d1495b;--c6:#2a9d9d;--c7:#7b8794}
+@media (prefers-color-scheme:dark){:root{--c0:#f0884f;--c1:#6aaee0;--c2:#6cc28f;--c3:#c08ae6;--c4:#e5c14c;--c5:#ee7384;--c6:#53c7c7;--c7:#a1acb8}}
+.ch{width:100%;height:auto;max-width:720px;display:block;overflow:visible}
+.ch-grid{stroke:var(--line,#ddd);stroke-width:1;fill:none}
+.ch-axis{fill:var(--muted,#777);font:11px system-ui,sans-serif}
+.ch-center{fill:var(--fg,#111);font:600 14px system-ui,sans-serif}
+.ch-bar:focus,.ch-dot:focus,.ch-arc:focus{outline:2px solid var(--accent,#d9622b);outline-offset:1px}
+.ch-bar:hover rect{opacity:.85}
+.ch-stroke{stroke-width:2;stroke-linejoin:round;stroke-linecap:round}
+.ch-area{opacity:.15}
+.ch-spark{width:120px;height:28px;display:inline-block;vertical-align:middle}
+.ch-c0{fill:var(--c0)}.ch-c1{fill:var(--c1)}.ch-c2{fill:var(--c2)}.ch-c3{fill:var(--c3)}.ch-c4{fill:var(--c4)}.ch-c5{fill:var(--c5)}.ch-c6{fill:var(--c6)}.ch-c7{fill:var(--c7)}
+.ch-s0{stroke:var(--c0)}.ch-s1{stroke:var(--c1)}.ch-s2{stroke:var(--c2)}.ch-s3{stroke:var(--c3)}.ch-s4{stroke:var(--c4)}.ch-s5{stroke:var(--c5)}.ch-s6{stroke:var(--c6)}.ch-s7{stroke:var(--c7)}
+.ch-legend{display:flex;flex-wrap:wrap;gap:4px 14px;list-style:none;padding:0;margin:6px 0;font-size:12px;color:var(--muted,#777)}
+.ch-swatch{display:inline-block;width:10px;height:10px;border-radius:2px;margin-right:5px}
+.ch-b0{background:var(--c0)}.ch-b1{background:var(--c1)}.ch-b2{background:var(--c2)}.ch-b3{background:var(--c3)}.ch-b4{background:var(--c4)}.ch-b5{background:var(--c5)}.ch-b6{background:var(--c6)}.ch-b7{background:var(--c7)}
+.ch-donut{max-width:200px}
