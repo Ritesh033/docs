@@ -5,7 +5,7 @@ An AI assistant, cloud infrastructure and a drive in one platform and one consol
 ```bash
 cd rd-cloude
 npm start                      # http://localhost:3000  (create an account on the landing page)
-npm test                       # ~560 tests, ~45 s
+npm test                       # 545 tests, ~45 s
 open http://localhost:3000/docs.html   # API reference generated from the router
 ```
 
