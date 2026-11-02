@@ -107,7 +107,7 @@ const builtinRenderers = {
 const BUILTIN = [
   ['chat', 'Chat', 'AI', 10], ['projects', 'Projects', 'AI', 20], ['artifacts', 'Artifacts', 'AI', 30],
   ['compute', 'Compute', 'Cloud', 10], ['storage', 'Storage', 'Cloud', 20], ['database', 'Database', 'Cloud', 30], ['drive', 'Drive', 'Cloud', 40],
-  ['keys', 'API keys', 'Account', 10], ['usage', 'Usage & billing', 'Account', 20],
+  ['usage', 'Usage & billing', 'Account', 20],
 ]
 const registry = new Map(BUILTIN.map(([id, title, group, order]) => [id, { id, title, group, order, render: builtinRenderers[id] }]))
 const GROUP_ORDER = ['AI', 'Cloud', 'Account']
@@ -155,10 +155,25 @@ async function boot() {
   if (state.token) { await loadUiModules(); buildNav(); route() }
 }
 $('#toggleMode').onclick = () => { mode = mode === 'login' ? 'register' : 'login'; $('#authForm button[type=submit]').textContent = mode === 'login' ? 'Sign in' : 'Create account'; $('#toggleMode').textContent = mode === 'login' ? 'Create an account' : 'Have an account? Sign in' }
+let challenge = null
 $('#authForm').onsubmit = async (e) => {
   e.preventDefault(); const f = new FormData(e.target)
-  try { const r = await api('POST', `/api/auth/${mode}`, { email: f.get('email'), password: f.get('password') }); state.token = r.token; localStorage.setItem('rd_token', r.token); boot() }
-  catch (err) { $('#authErr').textContent = err.message }
+  $('#authErr').textContent = ''
+  try {
+    const r = challenge
+      ? await api('POST', '/api/auth/login/2fa', { challenge, code: String(f.get('code') ?? '').trim() })
+      : await api('POST', `/api/auth/${mode}`, { email: f.get('email'), password: f.get('password') })
+    challenge = null
+    state.token = r.token; localStorage.setItem('rd_token', r.token)
+    if (r.warnings?.length) toast(r.warnings.join(' '), 'info')
+    boot()
+  } catch (err) {
+    if (err.data?.twoFactorRequired) {
+      challenge = err.data.challenge
+      $('#codeField').hidden = false; $('#codeField').focus()
+      $('#authErr').textContent = 'Enter the code from your authenticator app (or a recovery code).'
+    } else $('#authErr').textContent = err.message
+  }
 }
 addEventListener('hashchange', route)
 boot()

@@ -6,7 +6,7 @@ import { EventEmitter } from 'node:events'
 import { fileURLToPath, pathToFileURL } from 'node:url'
 import { Router, HttpError, HANDLED, readBody, readJson, sendJson, sendBuffer, sendText } from './http.js'
 import { createDb } from './db.js'
-import { authRoutes, authenticate } from './auth.js'
+import { authRoutes, authenticate, clientIp } from './auth.js'
 import { aiRoutes } from './ai.js'
 import { driveRoutes } from './drive.js'
 import { billingRoutes } from './billing.js'
@@ -20,13 +20,20 @@ const MIME = {
   '.ico': 'image/x-icon', '.woff2': 'font/woff2', '.txt': 'text/plain; charset=utf-8', '.map': 'application/json',
 }
 
-// Fixed-window rate limit per client (key or IP): 300 req/min.
-const hits = new Map()
-function rateLimited(id) {
-  const now = Date.now()
-  const h = hits.get(id)
-  if (!h || now - h.start > 60_000) return hits.set(id, { start: now, n: 1 }), false
-  return ++h.n > 300
+// Fixed-window rate limit per client (API key / user id / client IP): 300 API requests per minute. One table per app.
+function makeRateLimiter(limit = Number(process.env.RD_RATE_LIMIT) || 300) {
+  const hits = new Map()
+  let lastSweep = Date.now()
+  return (id) => {
+    const now = Date.now()
+    if (now - lastSweep > 60_000) {
+      lastSweep = now
+      for (const [k, v] of hits) if (now - v.start > 60_000) hits.delete(k)
+    }
+    const h = hits.get(id)
+    if (!h || now - h.start > 60_000) return hits.set(id, { start: now, n: 1 }), false
+    return ++h.n > limit
+  }
 }
 
 const BASE_SECURITY_HEADERS = {
@@ -45,14 +52,19 @@ export async function createApp({ dataDir, strictModules = process.env.RD_STRICT
   const router = new Router()
   const events = new EventEmitter()
   events.setMaxListeners(100)
-  const hooks = { beforeRoute: [], onRequestEnd: [] }
+  const hooks = { onRequest: [], beforeRoute: [], onRequestEnd: [] }
+  const rateLimited = makeRateLimiter()
   const ctx = { db, router, events, hooks, config: { dataDir, root: ROOT }, HANDLED, startedAt: new Date().toISOString() }
 
-  authRoutes(router, db)
+  authRoutes(router, db, ctx)
   aiRoutes(router, db, ctx)
   driveRoutes(router, db, ctx)
   billingRoutes(router, db, ctx)
-  router.get('/api/health', () => ({ ok: true, name: 'RD Cloude' }), { public: true })
+  router.get('/api/health', () => {
+    const dbHealth = typeof db.health === 'function' ? db.health() : { ok: true }
+    const out = { ok: dbHealth.ok !== false, name: 'RD Cloude', db: dbHealth.ok !== false }
+    return out.ok ? out : [503, out]
+  }, { public: true })
   router.get('/api/ui-modules', () => {
     const dir = path.join(PUBLIC_DIR, 'ui')
     const files = fs.existsSync(dir) ? fs.readdirSync(dir).sort() : []
@@ -80,8 +92,10 @@ export async function createApp({ dataDir, strictModules = process.env.RD_STRICT
     const requestId = req.headers['x-request-id']?.toString().slice(0, 64) || crypto.randomUUID()
     res.setHeader('x-request-id', requestId)
     for (const [k, v] of Object.entries(BASE_SECURITY_HEADERS)) res.setHeader(k, v)
-    const url = new URL(req.url, 'http://localhost')
+    let url
+    try { url = new URL(req.url, 'http://localhost') } catch { return sendJson(res, 400, { error: 'Bad request URL' }) }
     const rc = { req, res, url, requestId, user: null, auth: null, route: null, params: {} }
+    for (const fn of hooks.onRequest) { try { fn(rc) } catch (e) { console.error('[rd-cloude] onRequest hook failed:', e.message) } }
     res.on('finish', () => {
       const info = { ...rc, status: res.statusCode, durationMs: Number(process.hrtime.bigint() - started) / 1e6, pattern: rc.route?.pattern ?? null }
       for (const fn of hooks.onRequestEnd) { try { fn(info) } catch (e) { console.error('[rd-cloude] onRequestEnd hook failed:', e.message) } }
@@ -99,11 +113,14 @@ export async function createApp({ dataDir, strictModules = process.env.RD_STRICT
       if (!m.route.public && !auth) throw new HttpError(401, 'Authentication required')
       rc.auth = auth
       rc.user = auth?.user ?? null
-      if (rateLimited(auth?.keyId ?? auth?.user.id ?? req.socket.remoteAddress)) throw new HttpError(429, 'Rate limit exceeded')
+      if (rateLimited(auth?.keyId ?? auth?.user.id ?? clientIp(req))) throw new HttpError(429, 'Rate limit exceeded')
       for (const fn of hooks.beforeRoute) await fn(rc)
       const hasBody = ['POST', 'PUT', 'PATCH', 'DELETE'].includes(req.method) && !m.route.stream
       const raw = hasBody ? await readBody(req) : Buffer.alloc(0)
-      const body = !m.route.raw && !m.route.stream && raw.length ? readJson(raw) : {}
+      let body = !m.route.raw && !m.route.stream && raw.length ? readJson(raw) : {}
+      if (body === null || typeof body !== 'object' || Array.isArray(body)) {
+        if (m.route.allowNonObjectBody) { /* route opted in */ } else throw new HttpError(400, 'JSON body must be an object')
+      }
       let out = await m.route.handler({
         req, res, params: m.params, query: url.searchParams, body, raw, user: rc.user, auth, requestId, ctx,
       })
@@ -127,7 +144,11 @@ export async function createApp({ dataDir, strictModules = process.env.RD_STRICT
       sendJson(res, 500, { error: 'Internal server error' })
     }
   })
-  server.on('close', () => { events.emit('shutdown'); db.flush() })
+  server.on('close', () => {
+    events.emit('shutdown')
+    if (typeof db.close === 'function') db.close()
+    else db.flush()
+  })
   return { server, db, ctx }
 }
 

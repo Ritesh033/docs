@@ -52,12 +52,18 @@ export async function register(r, db, ctx) {
   otherwise tell the billing owner via your final report.
 * **Strict loading**: in tests modules load with `strictModules: true` (a broken module throws). In dev a broken module is logged and skipped.
 
-## Database API (`db`, synchronous, in-memory + persisted)
+## Database API (`db`, synchronous, in-memory + durable WAL; details in docs/storage-engine.md)
 
-`insert(col, doc)` (adds `id`, `createdAt`), `get(col,id)`, `find(col, pred)`, `findOne(col, pred)`, `update(col,id,patch)` (sets `updatedAt`),
-`remove(col,id)`, `removeWhere(col,pred)`, `id(prefix)`, `putBlob/getBlob/deleteBlob(blobId, buf)`, `flush()`.
-Collections are created on demand; **prefix your collection names with your module name** to avoid clashes (`fn_functions`, `net_vpcs`).
-Existing core collections: users, sessions, apiKeys, projects, conversations, messages, artifacts, instances, buckets, objects, files, shares, docs, usage.
+`insert(col, doc)` (adds `id`, `createdAt`; an explicit existing id throws `EDBDUPLICATE`), `get(col,id)`, `find(col, pred)`, `findOne(col, pred)`, `count(col, pred?)`,
+`update(col,id,patch)` (sets `updatedAt`; `id` in the patch is ignored; a value of `undefined` unsets the field), `remove(col,id)`, `removeWhere(col,pred)` (predicate required),
+`transaction(fn)` (atomic WAL record, rolls back on throw), `collections()`, `id(prefix)`.
+Indexes: `index(col, field)`, `findBy(col, field, value)`, `findOneBy(...)`, `dropIndex`, `reindex` - O(1), same ordering as `find()`; **use `findBy(col, 'userId', user.id)` instead of full scans on hot paths**.
+Blobs: `putBlob(id, buf)`, `getBlob(id)` (returns `null` if missing - handle it with a 404; throws `BlobCorruptError`/`EBLOBCORRUPT` on checksum failure), `deleteBlob`, `hasBlob`, `statBlob`, `listBlobs`, `verifyBlobs`,
+`gcBlobs(isReferenced, {graceMs, dryRun})` (never automatic: modules that store blob ids must be included in the reference set).
+Ops: `flush()`, `compact()`, `backup(destDir)` (never pass a client-supplied path), `stats()`, `health()` (`ok:false` = engine poisoned by an I/O error), `close()`.
+Rules: **mutate only through insert/update/remove** (editing a returned row in place is not logged and is lost on crash); store JSON-safe values only (no Date/Map/Buffer/NaN);
+collection names match `/^[A-Za-z0-9_][A-Za-z0-9_.:@-]{0,127}$/` and should be **prefixed with your module name** (`fn_functions`, `net_vpcs`); blob ids are validated.
+Core collections: users, sessions, apiKeys, projects, conversations, messages, artifacts, instances, buckets, objects, files, shares, docs, usage; security adds auth_tokens, org_orgs, org_members, org_invites, audit_log, audit_state; ai adds ai_knowledge, ai_prompts, ai_shares.
 
 ## UI modules (`public/ui/*.js`)
 
@@ -85,4 +91,20 @@ A module may ship `public/ui/<name>.css` (auto-linked by the shell; prefix every
 * Docs: update `docs/<area>.md` for what you built (concise: what it does, API, limits, security notes).
 
 ## Event / hook registry
-(append new events here)
+
+**Hooks** (`ctx.hooks`): `onRequest(rc)` runs first for EVERY request (even 404/401/static) - used for security headers, CORS and request-id sanitising; `beforeRoute(rc)` after auth; `onRequestEnd(info)` when the response finishes.
+
+**Events** (`ctx.events`):
+* `audit` `{userId, action, resource, ip, requestId, req, meta}` - append to the tamper-evident audit log. Pass `req` so the automatic HTTP capture does not duplicate the entry. Use `ctx.audit(userId, action, resource, meta)`.
+* `account.export` `{userId, add(name, rows)}`, `account.deleting` `{userId, veto(msg)}`, `account.deleted` `{userId, email}` - rows carrying `userId` are exported/purged generically; anything else (and blobs kept elsewhere) must hook these.
+* `org.created`, `org.deleted` `{orgId, memberIds}`, `org.member.added|removed|role_changed`.
+* `ai.generation` `{userId, conversationId, messageId, model, provider, status, inputTokens, outputTokens, toolCalls, durationMs}`.
+* `notification` `{userId, title, body, level, link, source}` - consumed by the notifications inbox (billing area) once present.
+* `shutdown` - server closing.
+
+**ctx fields**: `mailer` (`send({to,subject,text,tags})`), `audit(...)`, `access` `{canAccess, orgRole, listOrgIds, require, filter}` (org-shared records carry `{userId, orgId}`; check with `ctx.access.require(userId, row, 'read|write|delete')`, answering 404 on denial),
+`scopes.register(prefix, service)` (API-key scope mapping; unregistered prefixes fall back to global read/write; modules that load before security.js may queue `(ctx.scopeRules ??= []).push([prefix, service])`),
+`csp.add(directive, ...values)`, `ai.registerTool({name, description, input_schema, run})`, `quotas.check(userId, kind, qty)` (optional; billing area), `loadErrors`.
+
+**Public non-API routes**: `/s/:token` (drive shares), `/share/:token` (shared conversations), `/preview/:ticket` (sandboxed artifact previews), `/auth/account` (account pages), `/pub/*` and `/site/*` (storage), `/fn/*` (functions).
+Routes that deliberately serve user HTML must send their own `Content-Security-Policy` via `{ headers }`.

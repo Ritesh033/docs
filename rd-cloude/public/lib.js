@@ -36,7 +36,12 @@ export async function api(method, path, body, opts = {}) {
   }
   const isJson = res.headers.get('content-type')?.includes('json')
   const data = isJson ? await res.json() : await res.blob()
-  if (!res.ok) throw new Error(data?.error || res.statusText)
+  if (!res.ok) {
+    const err = new Error(data?.error || res.statusText)
+    err.status = res.status
+    err.data = isJson ? data : null
+    throw err
+  }
   return data
 }
 

@@ -13,7 +13,7 @@ export class Router {
     const re = new RegExp(
       '^' + pattern.replace(/\/\*(\w+)|:(\w+)/g, (m, splat, name) => (keys.push(splat ?? name), splat ? '/(.+)' : '([^/]+)')) + '/?$',
     )
-    this.routes.push({ method, re, keys, handler, pattern, public: !!opts.public, optionalAuth: !!opts.optionalAuth, raw: !!opts.raw, stream: !!opts.stream, meta: opts.meta ?? null })
+    this.routes.push({ method, re, keys, handler, pattern, public: !!opts.public, optionalAuth: !!opts.optionalAuth, raw: !!opts.raw, stream: !!opts.stream, meta: opts.meta ?? null, allowNonObjectBody: !!opts.allowNonObjectBody })
   }
   get = (p, h, o) => this.add('GET', p, h, o)
   post = (p, h, o) => this.add('POST', p, h, o)
@@ -26,7 +26,9 @@ export class Router {
       const m = r.re.exec(pathname)
       if (m) {
         const params = {}
-        r.keys.forEach((k, i) => (params[k] = decodeURIComponent(m[i + 1])))
+        r.keys.forEach((k, i) => {
+          try { params[k] = decodeURIComponent(m[i + 1]) } catch { throw new HttpError(400, 'Malformed percent-encoding in URL') }
+        })
         return { route: r, params }
       }
     }
