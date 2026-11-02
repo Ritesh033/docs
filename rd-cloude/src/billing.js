@@ -180,12 +180,18 @@ export function syncDerived(db, userId, now = Date.now()) {
       db.update('instances', i.id, { billedHours: h })
     }
   }
+  // Elastic IPs bill hourly while allocated (associated or not, like most clouds)
+  for (const e of typeof db.findBy === 'function' ? db.findBy('net_eips', 'userId', userId) : db.find('net_eips', (x) => x.userId === userId)) {
+    const hours = (now - (e.billedUntil ?? Date.parse(e.createdAt))) / 36e5
+    if (hours > 1e-6) { record(db, userId, 'network.eip_hour', hours); db.update('net_eips', e.id, { billedUntil: now }) }
+  }
   const st = db.findOne('billing_state', (s) => s.userId === userId) ?? db.insert('billing_state', { userId, storageDay: dayKey(now - DAY) })
   const yesterday = dayKey(now - DAY)
   if (st.storageDay < yesterday) {
     const bytes = storageBytes(db, userId)
     const sqlBytes = (typeof db.findBy === 'function' ? db.findBy('sql_databases', 'userId', userId) : db.find('sql_databases', (x) => x.userId === userId)).reduce((sum, x) => sum + (x.sizeBytes ?? 0), 0)
-    if (bytes > 0 || sqlBytes > 0) {
+    const volumeGb = (typeof db.findBy === 'function' ? db.findBy('cmp_volumes', 'userId', userId) : db.find('cmp_volumes', (x) => x.userId === userId)).filter((v) => v.state !== 'deleted').reduce((sum, v) => sum + (v.sizeGb ?? 0), 0)
+    if (bytes > 0 || sqlBytes > 0 || volumeGb > 0) {
       let d = Date.parse(`${st.storageDay}T00:00:00Z`) + DAY
       const end = Date.parse(`${yesterday}T00:00:00Z`)
       if (end - d > 62 * DAY) d = end - 61 * DAY
@@ -194,6 +200,7 @@ export function syncDerived(db, userId, now = Date.now()) {
         const dim = new Date(Date.UTC(new Date(d).getUTCFullYear(), new Date(d).getUTCMonth() + 1, 0)).getUTCDate()
         if (bytes > 0) record(db, userId, 'storage.gb_month', bytes / GiB / dim, { key: `storage:${day}` })
         if (sqlBytes > 0) record(db, userId, 'sql.gb_month', sqlBytes / GiB / dim, { key: `sql:${day}` })
+        if (volumeGb > 0) record(db, userId, 'compute.volume_gb_month', volumeGb / dim, { key: `vol:${day}` })
       }
     }
     db.update('billing_state', st.id, { storageDay: yesterday })

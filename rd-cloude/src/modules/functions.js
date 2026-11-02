@@ -641,5 +641,5 @@ export async function register(r, db, ctx) {
     for (const fn of by('fn_functions', 'userId', userId)) { for (const x of warm.get(fn.id) ?? []) x.kill(); warm.delete(fn.id) }
     for (const col of ['fn_functions', 'fn_invocations', 'fn_kv', 'fn_jobs']) db.removeWhere(col, (x) => x.userId === userId)
   })
-  ctx.scopeRules?.push?.(['/api/functions', 'compute'])
+  ;(ctx.scopeRules ??= []).push(['/api/functions', 'compute'])
 }

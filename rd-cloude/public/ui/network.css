@@ -1,0 +1,19 @@
+.nw-topo{width:100%;max-width:980px;height:auto;display:block}
+.nw-vpc{fill:color-mix(in srgb,var(--c1) 8%,transparent);stroke:var(--c1);stroke-width:1.5}
+.nw-subnet{fill:var(--bg);stroke:var(--line);stroke-width:1.5}.nw-subnet.pub{stroke:var(--c2)}
+.nw-inst{stroke:var(--line)}.nw-inst.running{fill:color-mix(in srgb,#2a9d6a 35%,var(--bg))}.nw-inst.stopped,.nw-inst.pending,.nw-inst.stopping{fill:color-mix(in srgb,#c9a227 35%,var(--bg))}.nw-inst.terminated,.nw-inst.shutting-down{fill:color-mix(in srgb,#c0392b 30%,var(--bg))}
+.nw-label{fill:var(--fg);font:12px system-ui,sans-serif}.nw-sub{fill:var(--muted);font:11px system-ui,sans-serif}
+.nw-igw{fill:var(--c0);stroke:none}
+.nw-wrap{display:grid;gap:10px}
+.nw-row{display:flex;gap:8px;flex-wrap:wrap;align-items:center;margin:8px 0}
+.nw-table{width:100%;border-collapse:collapse;font-size:13px}.nw-table th,.nw-table td{padding:6px 8px;border-bottom:1px solid var(--line);text-align:left}
+.nw-card{border:1px solid var(--line);border-radius:8px;padding:10px;background:var(--panel);margin:8px 0}
+.nw-tabs{display:flex;gap:4px;border-bottom:1px solid var(--line);margin:8px 0 14px;flex-wrap:wrap}
+.nw-tabs a{padding:6px 12px;text-decoration:none;color:var(--muted);border-bottom:2px solid transparent;margin-bottom:-1px}
+.nw-tabs a[aria-current=page]{color:var(--fg);border-bottom-color:var(--accent)}
+.nw-form{display:grid;grid-template-columns:repeat(auto-fit,minmax(170px,1fr));gap:10px}
+.nw-form label{display:grid;gap:3px;font-size:13px;color:var(--muted)}.nw-form input,.nw-form select{width:100%;box-sizing:border-box}
+.nw-ok{color:#2a9d6a}.nw-bad{color:#c0392b}
+.nw-result{border-left:3px solid var(--line);padding:8px 12px;margin:10px 0;background:var(--panel);border-radius:0 6px 6px 0}.nw-result.allowed{border-left-color:#2a9d6a}.nw-result.denied{border-left-color:#c0392b}
+.nw-err{background:color-mix(in srgb,#c0392b 12%,transparent);border-left:3px solid #c0392b;padding:8px 10px;border-radius:0 6px 6px 0;margin:8px 0;font-size:13px}
+.nw-banner{border-left:3px solid var(--accent);background:var(--panel);padding:8px 12px;border-radius:0 6px 6px 0;margin:8px 0 12px;font-size:13px}
