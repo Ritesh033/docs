@@ -365,11 +365,15 @@ describe('persistence and write-ahead log', () => {
 
   test('hard kill (SIGKILL) while writing loses no acknowledged write', async () => {
     const dir = tmpdir()
+    // The id is printed with a blocking fs.writeSync (never process.stdout, which may buffer), so "printed" == "acknowledged"
+    // and at most the single insert in flight at kill time can be missing from the output.
     const p = child(`
+      import fs from 'node:fs'
+      const say = (s) => { for (;;) { try { fs.writeSync(1, s); return } catch (e) { if (e.code !== 'EAGAIN') throw e } } }
       const db = E.createDb(${JSON.stringify(dir)}, { logger: { info() {}, warn() {}, error() {} }, fsync: 'never' })
       for (let i = 0; i < 200000; i++) {
         const r = db.insert('c', { i, pad: 'x'.repeat(i % 50) })
-        process.stdout.write(r.id + '\\n')
+        say(r.id + '\\n')
         if (i % 25 === 0) await new Promise((res) => setImmediate(res))
       }
     `)
@@ -377,11 +381,14 @@ describe('persistence and write-ahead log', () => {
     p.kill('SIGKILL')
     const { signal } = await p.exited
     assert.equal(signal, 'SIGKILL')
+    // The child may have run ahead of this process while the machine was busy; everything it printed sits in the pipe until EOF.
+    if (!p.stdout.readableEnded) await Promise.race([new Promise((res) => p.stdout.once('end', res)), sleep(5000)])
     const acked = p.out.split('\n').filter((l) => /^c_[0-9a-f]{16}$/.test(l))
     assert.ok(acked.length >= 400)
     const db = open(dir)
     for (const id of acked) assert.ok(db.get('c', id), `acknowledged record ${id} survived`)
-    assert.ok(db.count('c') <= acked.length + 30, 'only records the child had already written beyond what it printed')
+    // the child prints an id right after its insert returns, so at most the one insert in flight at kill time is unprinted
+    assert.ok(db.count('c') <= acked.length + 1, `no phantom records: ${db.count('c')} rows for ${acked.length} acknowledged`)
     db.insert('c', { after: 'crash' })
     db.close()
   })
