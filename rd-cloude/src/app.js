@@ -139,7 +139,7 @@ export async function createApp({ dataDir, strictModules = process.env.RD_STRICT
       if (res.headersSent) return res.end()
       if (e instanceof HttpError) {
         if (e.headers) for (const [k, v] of Object.entries(e.headers)) res.setHeader(k, v)
-        return sendJson(res, e.status, { error: e.message })
+        return sendJson(res, e.status, { error: e.message, ...(Array.isArray(e.errors) ? { errors: e.errors } : {}) })
       }
       console.error(e)
       sendJson(res, 500, { error: 'Internal server error' })

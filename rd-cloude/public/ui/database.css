@@ -1,0 +1,23 @@
+.db-layout{display:grid;grid-template-columns:220px 1fr;gap:16px;align-items:start}
+.db-side{border:1px solid var(--line);border-radius:8px;padding:8px;background:var(--panel)}
+.db-side h3{margin:4px 6px 8px;font-size:13px;text-transform:uppercase;color:var(--muted)}
+.db-side button.db-coll{display:flex;justify-content:space-between;gap:8px;width:100%;text-align:left;background:none;color:var(--fg);border:1px solid transparent;border-radius:6px;padding:6px 8px;cursor:pointer}
+.db-side button.db-coll:hover,.db-side button.db-coll[aria-current=true]{border-color:var(--accent)}
+.db-side .cnt{color:var(--muted);font-size:12px}
+.db-tabs{display:flex;gap:4px;border-bottom:1px solid var(--line);margin-bottom:12px;flex-wrap:wrap}
+.db-tabs button{background:none;border:0;border-bottom:2px solid transparent;color:var(--muted);padding:6px 12px;border-radius:0;cursor:pointer}
+.db-tabs button[aria-selected=true]{color:var(--fg);border-bottom-color:var(--accent)}
+.db-row{display:flex;gap:8px;flex-wrap:wrap;align-items:center;margin:8px 0}
+.db-code{font-family:ui-monospace,Menlo,monospace;font-size:13px;width:100%;min-height:84px}
+.db-table{width:100%;border-collapse:collapse}
+.db-table th,.db-table td{padding:6px 8px;border-bottom:1px solid var(--line);text-align:left;vertical-align:top}
+.db-table td.json{font-family:ui-monospace,Menlo,monospace;font-size:12px;max-width:520px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.db-id{font-family:ui-monospace,Menlo,monospace;font-size:12px;color:var(--muted)}
+.db-errors{background:color-mix(in srgb,#c0392b 12%,transparent);border-left:3px solid #c0392b;padding:8px 10px;border-radius:0 6px 6px 0;margin:8px 0;font-size:13px}
+.db-plan{color:var(--muted);font-size:12px}
+.db-log{max-height:360px;overflow:auto;border:1px solid var(--line);border-radius:6px;padding:6px;font-family:ui-monospace,Menlo,monospace;font-size:12px}
+.db-log div{padding:2px 0;border-bottom:1px dashed var(--line)}
+.db-ins{color:#2a9d6a}.db-upd{color:#c9a227}.db-del{color:#c0392b}
+dialog.db-dlg{border:1px solid var(--line);border-radius:10px;background:var(--bg);color:var(--fg);width:min(720px,calc(100% - 24px));padding:16px}
+dialog.db-dlg::backdrop{background:#0007}
+@media (max-width:760px){.db-layout{grid-template-columns:1fr}}

@@ -15,7 +15,8 @@ export async function startTestApp(opts = {}) {
       body: raw ?? (body !== undefined ? JSON.stringify(body) : undefined),
     })
     const type = res.headers.get('content-type') || ''
-    const data = type.includes('json') ? await res.json() : type.startsWith('text/') ? await res.text() : Buffer.from(await res.arrayBuffer())
+    const isText = type.startsWith('text/') || type.includes('ndjson')
+    const data = type.includes('json') && !type.includes('ndjson') ? await res.json() : isText ? await res.text() : Buffer.from(await res.arrayBuffer())
     return { status: res.status, headers: res.headers, data }
   }
   /** Registers a user and returns { token, user, call: (method, path, opts) bound to this user }. */

@@ -34,7 +34,7 @@ export async function api(method, path, body, opts = {}) {
     location.reload()
     throw new Error('Session expired')
   }
-  const isJson = res.headers.get('content-type')?.includes('json')
+  const isJson = /(^|[/+])json\b/.test(res.headers.get('content-type') ?? '') // application/json, +json; not x-ndjson
   const data = isJson ? await res.json() : await res.blob()
   if (!res.ok) {
     const err = new Error(data?.error || res.statusText)
