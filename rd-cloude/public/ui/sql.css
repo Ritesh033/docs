@@ -1,0 +1,25 @@
+.sq-layout{display:grid;grid-template-columns:230px 1fr;gap:16px;align-items:start}
+.sq-side{border:1px solid var(--line);border-radius:8px;padding:8px;background:var(--panel)}
+.sq-side h3{margin:4px 6px 8px;font-size:13px;text-transform:uppercase;color:var(--muted)}
+.sq-side button.sq-db{display:block;width:100%;text-align:left;background:none;color:var(--fg);border:1px solid transparent;border-radius:6px;padding:6px 8px;cursor:pointer}
+.sq-side button.sq-db:hover,.sq-side button.sq-db[aria-current=true]{border-color:var(--accent)}
+.sq-side small{color:var(--muted);display:block}
+.sq-tabs{display:flex;gap:4px;border-bottom:1px solid var(--line);margin:8px 0 12px;flex-wrap:wrap}
+.sq-tabs button{background:none;border:0;border-bottom:2px solid transparent;color:var(--muted);padding:6px 12px;border-radius:0;cursor:pointer}
+.sq-tabs button[aria-selected=true]{color:var(--fg);border-bottom-color:var(--accent)}
+.sq-row{display:flex;gap:8px;flex-wrap:wrap;align-items:center;margin:8px 0}
+.sq-code{font-family:ui-monospace,Menlo,monospace;font-size:13px;width:100%;min-height:150px;tab-size:2}
+.sq-grid-wrap{overflow:auto;max-height:420px;border:1px solid var(--line);border-radius:6px;margin:6px 0}
+.sq-grid{border-collapse:collapse;font-size:13px;width:100%}
+.sq-grid th,.sq-grid td{padding:4px 8px;border-bottom:1px solid var(--line);text-align:left;white-space:nowrap;max-width:360px;overflow:hidden;text-overflow:ellipsis}
+.sq-grid th{position:sticky;top:0;background:var(--panel)}
+.sq-grid td.null{color:var(--muted);font-style:italic}.sq-grid td.num{text-align:right;font-variant-numeric:tabular-nums}
+.sq-meta{color:var(--muted);font-size:12px;margin:2px 0}
+.sq-err{background:color-mix(in srgb,#c0392b 12%,transparent);border-left:3px solid #c0392b;padding:8px 10px;border-radius:0 6px 6px 0;margin:8px 0;font-size:13px;white-space:pre-wrap}
+.sq-tree details{margin:2px 0}.sq-tree summary{cursor:pointer}
+.sq-tree code{color:var(--muted);font-size:12px}
+.sq-hist button{display:block;width:100%;text-align:left;background:none;color:var(--fg);border:0;border-bottom:1px solid var(--line);padding:6px 4px;cursor:pointer;font-family:ui-monospace,Menlo,monospace;font-size:12px;border-radius:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.sq-hist button:hover{background:var(--panel)}
+.sq-ok{color:#2a9d6a}.sq-bad{color:#c0392b}
+@media (max-width:760px){.sq-layout{grid-template-columns:1fr}}
+.sq-side input{width:100%;box-sizing:border-box}

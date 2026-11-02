@@ -184,14 +184,16 @@ export function syncDerived(db, userId, now = Date.now()) {
   const yesterday = dayKey(now - DAY)
   if (st.storageDay < yesterday) {
     const bytes = storageBytes(db, userId)
-    if (bytes > 0) {
+    const sqlBytes = (typeof db.findBy === 'function' ? db.findBy('sql_databases', 'userId', userId) : db.find('sql_databases', (x) => x.userId === userId)).reduce((sum, x) => sum + (x.sizeBytes ?? 0), 0)
+    if (bytes > 0 || sqlBytes > 0) {
       let d = Date.parse(`${st.storageDay}T00:00:00Z`) + DAY
       const end = Date.parse(`${yesterday}T00:00:00Z`)
       if (end - d > 62 * DAY) d = end - 61 * DAY
       for (; d <= end; d += DAY) {
         const day = dayKey(d)
         const dim = new Date(Date.UTC(new Date(d).getUTCFullYear(), new Date(d).getUTCMonth() + 1, 0)).getUTCDate()
-        record(db, userId, 'storage.gb_month', bytes / GiB / dim, { key: `storage:${day}` })
+        if (bytes > 0) record(db, userId, 'storage.gb_month', bytes / GiB / dim, { key: `storage:${day}` })
+        if (sqlBytes > 0) record(db, userId, 'sql.gb_month', sqlBytes / GiB / dim, { key: `sql:${day}` })
       }
     }
     db.update('billing_state', st.id, { storageDay: yesterday })
