@@ -54,7 +54,8 @@ export async function createApp({ dataDir, strictModules = process.env.RD_STRICT
   events.setMaxListeners(100)
   const hooks = { onRequest: [], beforeRoute: [], onRequestEnd: [] }
   const rateLimited = makeRateLimiter()
-  const ctx = { db, router, events, hooks, config: { dataDir, root: ROOT }, HANDLED, startedAt: new Date().toISOString() }
+  // blobRefs: modules that keep blob ids register a generator of their referenced ids here ('drive', 'storage', ...), used by blob GC.
+  const ctx = { db, router, events, hooks, blobRefs: new Map(), config: { dataDir, root: ROOT }, HANDLED, startedAt: new Date().toISOString() }
 
   authRoutes(router, db, ctx)
   aiRoutes(router, db, ctx)
