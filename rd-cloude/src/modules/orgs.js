@@ -40,6 +40,16 @@ export function canAccess(db, userId, resource, permission = 'read') {
   return role !== null && rank(role) >= rank(need)
 }
 
+/**
+ * Guard for handlers: returns `resource` when the user may do `permission`, otherwise throws the platform's tenant-isolation answer:
+ * 404 when they cannot even read it (existence is not revealed), 403 when they can read it but lack the role for the action.
+ */
+export function requireAccess(db, userId, resource, permission = 'read') {
+  if (canAccess(db, userId, resource, permission)) return resource
+  if (PERMISSIONS[permission] && permission !== 'read' && canAccess(db, userId, resource, 'read')) throw new HttpError(403, `This requires the ${PERMISSIONS[permission]} role or higher`)
+  throw new HttpError(404, 'Not found')
+}
+
 const DOCS = {
   'GET /api/orgs': 'Organizations you belong to, with your role',
   'POST /api/orgs': 'Create an organization (you become the owner)',
@@ -70,6 +80,10 @@ export async function register(router, db, ctx) {
     canAccess: (userId, resource, permission) => canAccess(db, userId, resource, permission),
     orgRole: (userId, orgId) => orgRole(db, userId, orgId),
     listOrgIds: (userId) => listOrgIds(db, userId),
+    /** Throws 404 (cannot read) / 403 (read-only role) unless allowed; returns the resource: `const doc = ctx.access.require(user.id, doc, 'write')`. */
+    require: (userId, resource, permission) => requireAccess(db, userId, resource, permission),
+    /** Rows the user may `permission` (default read): their own personal rows plus rows of organizations they belong to with a sufficient role. */
+    filter: (userId, rows, permission = 'read') => rows.filter((row) => canAccess(db, userId, row, permission)),
   }
 
   const audit = (rc, userId, action, resource, meta) => emitAudit(ctx, rc.req, rc.requestId, userId, action, resource, meta)

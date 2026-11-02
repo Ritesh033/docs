@@ -417,6 +417,23 @@ test('canAccess: personal resources, org roles, ex-members and bad input', async
     assert.deepEqual(app.ctx.access.listOrgIds(t.owner.user.id), [id])
     assert.deepEqual(app.ctx.access.listOrgIds(outsider.user.id), [])
     assert.deepEqual(app.ctx.access.ROLES, ['viewer', 'member', 'admin', 'owner'])
+
+    // handler helpers: 404 when the resource must stay invisible, 403 when it is visible but the role is too low, rows filtered by permission
+    const req = (u, resource, perm) => { try { return app.ctx.access.require(u.user.id, resource, perm) } catch (e) { return e.status } }
+    assert.equal(req(t.owner, shared, 'delete'), shared, 'returns the resource when allowed')
+    assert.equal(req(t.admin, shared, 'write'), 403, 'viewer can read but not write')
+    assert.equal(req(t.admin, shared, 'read'), shared)
+    assert.equal(req(outsider, shared, 'read'), 404, 'outsiders learn nothing')
+    assert.equal(req(outsider, shared, 'write'), 404)
+    assert.equal(req(t.owner, shared, 'nuke'), 404, 'unknown permission denies without revealing')
+    assert.equal(req(t.member, personal, 'delete'), personal, 'personal rows: only their owner')
+    assert.equal(req(outsider, personal, 'read'), 404)
+    assert.equal(req(t.owner, personal, 'read'), 404, 'org owners get no access to personal rows')
+    const rows = [shared, personal, { id: 'x', userId: outsider.user.id }]
+    assert.deepEqual(app.ctx.access.filter(t.admin.user.id, rows), [shared], 'admin (now viewer) sees the org row, not others personal rows')
+    assert.deepEqual(app.ctx.access.filter(t.admin.user.id, rows, 'write'), [])
+    assert.deepEqual(app.ctx.access.filter(t.owner.user.id, rows, 'delete'), [shared])
+    assert.deepEqual(app.ctx.access.filter(t.member.user.id, rows, 'delete'), [personal], 'member left the org: only the personal row remains theirs')
   })
 })
 

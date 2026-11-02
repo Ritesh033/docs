@@ -1,13 +1,15 @@
 // Authentication & identity for RD Cloude: passwords (scrypt, policy, throttling), sessions, TOTP two-factor auth,
 // recovery codes, password reset / email verification, API keys with scopes + expiry, pluggable mailer.
-// Zero dependencies (node:crypto only). Documented in docs/security.md. Also imported by
+// Zero dependencies (node:crypto / node:net / node:tls only; includes a small SMTP client). Documented in docs/security.md. Also imported by
 // src/modules/{security,orgs,audit}.js for the shared helpers exported below.
 //
 // Compatibility: `authRoutes(router, db[, ctx])` and `authenticate(db, req)` keep the signatures used by src/app.js.
 // All mutable state is keyed by the `db` object (WeakMap) so several apps can live in one process (tests do).
 import crypto from 'node:crypto'
 import fs from 'node:fs'
+import net from 'node:net'
 import path from 'node:path'
+import tls from 'node:tls'
 import { promisify } from 'node:util'
 import { HttpError, required } from './http.js'
 
@@ -53,10 +55,16 @@ export function str(v, name, { min = 1, max = 200 } = {}) {
   return s
 }
 
+// Conservative address syntax (RFC 5322 "atext" local part, dotted ASCII/punycode domain). It refuses quotes, commas, angle brackets,
+// spaces and non-ASCII characters on purpose: the address is later used as a mail recipient and a comma or bracket could address
+// several people through a lenient mail transport.
+const LOCAL_RE = /^[A-Za-z0-9!#$%&'*+/=?^_`{|}~-]+(\.[A-Za-z0-9!#$%&'*+/=?^_`{|}~-]+)*$/
+const DOMAIN_RE = /^([A-Za-z0-9]([A-Za-z0-9-]{0,61}[A-Za-z0-9])?\.)+[A-Za-z]{2,24}$/
 export function normEmail(v) {
   if (typeof v !== 'string') throw new HttpError(400, 'Invalid email')
   const e = v.trim().toLowerCase()
-  if (e.length > 254 || e.indexOf('@') > 64 || !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(e)) throw new HttpError(400, 'Invalid email')
+  const at = e.lastIndexOf('@')
+  if (e.length > 254 || at < 1 || at > 64 || !LOCAL_RE.test(e.slice(0, at)) || !DOMAIN_RE.test(e.slice(at + 1))) throw new HttpError(400, 'Invalid email')
   return e
 }
 
@@ -143,7 +151,7 @@ export function initAuth(ctx) {
 /** Emit an audit event (fire-and-forget; never throws). */
 export function emitAudit(ctx, req, requestId, userId, action, resource, meta) {
   try {
-    ctx?.events?.emit('audit', { userId, action, resource, ip: req ? clientIp(req) : undefined, requestId, meta })
+    ctx?.events?.emit('audit', { userId, action, resource, ip: req ? clientIp(req) : undefined, requestId, meta, req })
   } catch (e) {
     console.error('[rd-cloude] audit emit failed:', e.message)
   }
@@ -660,23 +668,278 @@ export function sweep(db) {
 
 /* ======================================================================= mailer + one-time tokens */
 
+/* ----------------------------------------------------------------------- SMTP transport (RFC 5321, STARTTLS RFC 3207, AUTH RFC 4954) */
+
+class SmtpError extends Error {
+  constructor(message, transient = false, code = null) {
+    super(message)
+    this.transient = transient
+    this.code = code
+  }
+}
+const isLocalHost = (h) => h === 'localhost' || h === '::1' || /^127\./.test(h)
+
+/** `RD_SMTP_URL=smtp[s]://user:pass@host[:port]` + `RD_MAIL_FROM`. Returns null when no SMTP transport is configured; throws on bad config. */
+export function smtpConfigFromEnv(env = process.env) {
+  if (!env.RD_SMTP_URL) return null
+  let u
+  try { u = new URL(env.RD_SMTP_URL) } catch { throw new Error('RD_SMTP_URL is not a valid URL') }
+  if (u.protocol !== 'smtp:' && u.protocol !== 'smtps:') throw new Error('RD_SMTP_URL must start with smtp:// or smtps://')
+  if (!u.hostname) throw new Error('RD_SMTP_URL needs a host')
+  if (!env.RD_MAIL_FROM) throw new Error('RD_MAIL_FROM is required when RD_SMTP_URL is set')
+  const secure = u.protocol === 'smtps:'
+  const host = u.hostname.replace(/^\[|\]$/g, '')
+  return {
+    host, port: Number(u.port) || (secure ? 465 : 587), secure,
+    user: decodeURIComponent(u.username), pass: decodeURIComponent(u.password),
+    from: env.RD_MAIL_FROM, allowPlaintext: env.RD_SMTP_ALLOW_PLAINTEXT === '1',
+    ca: env.RD_SMTP_CA_FILE ? fs.readFileSync(env.RD_SMTP_CA_FILE) : undefined,
+  }
+}
+
+/** `Name <addr>` or `addr` -> { addr, display }; the address goes through the same validation as user input. */
+function parseMailbox(v) {
+  const m = /^\s*(?:"?([^"<>\r\n]*?)"?\s*)?<([^<>\s]+)>\s*$/.exec(String(v))
+  const addr = normEmail(m ? m[2] : String(v))
+  return { addr, display: m?.[1]?.trim() || '' }
+}
+/** RFC 2047 encoded-words (<= 75 chars each, split on code point boundaries) for non-ASCII header text; plain ASCII passes through. */
+function encodeHeader(text) {
+  const t = String(text).replace(/[\r\n]+/g, ' ').trim()
+  if (/^[\x20-\x7e]*$/.test(t)) return t
+  const words = []
+  let cur = ''
+  for (const ch of t) {
+    if (Buffer.byteLength(cur + ch) > 45) { words.push(cur); cur = '' }
+    cur += ch
+  }
+  if (cur) words.push(cur)
+  return words.map((w) => `=?UTF-8?B?${Buffer.from(w).toString('base64')}?=`).join('\r\n ')
+}
+/** A complete RFC 5322 message (base64 text/plain body: no line-length or dot-stuffing surprises). */
+export function buildMessage({ from, to, subject, text, host }) {
+  const fromMb = parseMailbox(from)
+  const toMb = parseMailbox(to)
+  const body = Buffer.from(String(text).replace(/\r?\n/g, '\r\n'), 'utf8').toString('base64').replace(/.{1,76}/g, '$&\r\n')
+  const display = fromMb.display ? encodeHeader(fromMb.display.replace(/["\\]/g, '')) : ''
+  const fromHdr = display ? `${display.startsWith('=?') ? display : `"${display}"`} <${fromMb.addr}>` : fromMb.addr
+  return {
+    from: fromMb.addr, to: toMb.addr,
+    data: [
+      `From: ${fromHdr}`, `To: ${toMb.addr}`, `Subject: ${encodeHeader(subject)}`, `Date: ${new Date().toUTCString()}`,
+      `Message-ID: <${crypto.randomUUID()}@${/^[A-Za-z0-9.-]+$/.test(host) ? host : 'rd-cloude.invalid'}>`,
+      'MIME-Version: 1.0', 'Content-Type: text/plain; charset=utf-8', 'Content-Transfer-Encoding: base64', 'Auto-Submitted: auto-generated', '', body,
+    ].join('\r\n'),
+  }
+}
+
+/** One SMTP conversation over a socket: line-buffered multi-line replies, per-command timeout, bounded buffer. */
+class SmtpSession {
+  constructor(sock, timeoutMs) {
+    this.timeoutMs = timeoutMs
+    this.buf = ''
+    this.lines = []
+    this.waiter = null
+    this.error = null
+    this.tls = false
+    this.attach(sock)
+  }
+  attach(sock) {
+    this.sock = sock
+    sock.setEncoding('utf8')
+    sock.on('data', (chunk) => {
+      this.buf += chunk
+      if (this.buf.length > 65_536) return this.fail(new SmtpError('server sent an oversized reply', true))
+      let i
+      while ((i = this.buf.indexOf('\r\n')) >= 0) {
+        this.lines.push(this.buf.slice(0, i))
+        this.buf = this.buf.slice(i + 2)
+      }
+      this.pump()
+    })
+    sock.on('error', (e) => this.fail(new SmtpError(`connection error: ${e.code ?? e.message}`, true)))
+    sock.on('close', () => this.fail(new SmtpError('connection closed by the server', true)))
+  }
+  fail(err) {
+    this.error ??= err
+    this.sock.destroy()
+    this.pump()
+  }
+  pump() {
+    if (!this.waiter) return
+    const last = this.lines.findIndex((l) => /^\d{3}( |$)/.test(l))
+    if (last >= 0) {
+      const group = this.lines.splice(0, last + 1)
+      if (group.some((l) => !/^\d{3}[ -]/.test(l) && !/^\d{3}$/.test(l))) return this.fail(new SmtpError('malformed reply from the server', true))
+      const { resolve } = this.waiter
+      this.waiter = null
+      return resolve({ code: Number(group[0].slice(0, 3)), lines: group.map((l) => l.slice(4)) })
+    }
+    if (this.error) { const { reject } = this.waiter; this.waiter = null; reject(this.error) }
+  }
+  reply() {
+    return new Promise((resolve, reject) => {
+      const timer = setTimeout(() => this.fail(new SmtpError('timed out waiting for the server', true)), this.timeoutMs)
+      this.waiter = { resolve: (r) => { clearTimeout(timer); resolve(r) }, reject: (e) => { clearTimeout(timer); reject(e) } }
+      this.pump()
+    })
+  }
+  /** Send a command line and require a reply whose code is in `ok`. */
+  async cmd(line, ok, { secret = false } = {}) {
+    this.sock.write(`${line}\r\n`)
+    const r = await this.reply()
+    if (!ok.includes(r.code)) throw new SmtpError(`server refused ${secret ? 'authentication' : line.split(' ')[0]}: ${r.code} ${r.lines[0] ?? ''}`.slice(0, 200), r.code >= 400 && r.code < 500, r.code)
+    return r
+  }
+  async startTls(host, ca) {
+    if (this.buf.length || this.lines.length) throw new SmtpError('unexpected data before TLS (possible injection)', false)
+    const raw = this.sock
+    raw.removeAllListeners('data'); raw.removeAllListeners('close'); raw.removeAllListeners('error')
+    const secure = tls.connect({ socket: raw, servername: net.isIP(host) ? undefined : host, ca, minVersion: 'TLSv1.2' })
+    let timer
+    try {
+      await new Promise((resolve, reject) => {
+        timer = setTimeout(() => { secure.destroy(); reject(new SmtpError('TLS handshake timed out', true)) }, this.timeoutMs)
+        secure.once('secureConnect', resolve)
+        secure.once('error', (e) => reject(new SmtpError(`TLS failed: ${e.code ?? e.message}`, false)))
+      })
+    } finally { clearTimeout(timer) }
+    secure.removeAllListeners('error')
+    this.attach(secure)
+    this.tls = true
+  }
+  close() { this.sock.destroy() }
+}
+
+/** Deliver one message over a fresh connection. Throws SmtpError (transient = worth retrying). */
+async function smtpDeliver(cfg, msg) {
+  const timeoutMs = cfg.timeoutMs ?? 20_000
+  const local = cfg.treatAsLocal ?? isLocalHost(cfg.host)
+  const sock = await new Promise((resolve, reject) => {
+    const s = cfg.secure
+      ? tls.connect({ host: cfg.host, port: cfg.port, servername: net.isIP(cfg.host) ? undefined : cfg.host, ca: cfg.ca, minVersion: 'TLSv1.2' })
+      : net.connect({ host: cfg.host, port: cfg.port })
+    const timer = setTimeout(() => { s.destroy(); reject(new SmtpError('connect timeout', true)) }, cfg.connectTimeoutMs ?? 10_000)
+    s.once(cfg.secure ? 'secureConnect' : 'connect', () => { clearTimeout(timer); s.removeAllListeners('error'); resolve(s) })
+    s.once('error', (e) => { clearTimeout(timer); reject(new SmtpError(`cannot connect: ${e.code ?? e.message}`, !/CERT|HOSTNAME|SELF_SIGNED|UNABLE_TO/i.test(String(e.code)), null)) })
+  })
+  const sess = new SmtpSession(sock, timeoutMs)
+  sess.tls = !!cfg.secure
+  let delivered = false
+  try {
+    const greeting = await sess.reply()
+    if (greeting.code !== 220) throw new SmtpError(`unexpected greeting: ${greeting.code}`, greeting.code >= 400 && greeting.code < 500, greeting.code)
+    const helo = cfg.helo ?? 'rd-cloude.local'
+    let caps = (await sess.cmd(`EHLO ${helo}`, [250])).lines.map((l) => l.toUpperCase())
+    if (!sess.tls) {
+      if (caps.some((l) => l === 'STARTTLS')) {
+        await sess.cmd('STARTTLS', [220])
+        await sess.startTls(cfg.host, cfg.ca)
+        caps = (await sess.cmd(`EHLO ${helo}`, [250])).lines.map((l) => l.toUpperCase())
+      } else if (!local && !cfg.allowPlaintext) {
+        throw new SmtpError('the server does not offer STARTTLS: refusing to send mail unencrypted (RD_SMTP_ALLOW_PLAINTEXT=1 overrides)', false)
+      }
+    }
+    if (cfg.user) {
+      if (!sess.tls && !local && !cfg.allowPlaintext) throw new SmtpError('refusing to send credentials over an unencrypted connection', false)
+      const mech = caps.find((l) => l.startsWith('AUTH '))?.split(/\s+/).slice(1) ?? []
+      if (mech.includes('PLAIN')) await sess.cmd(`AUTH PLAIN ${Buffer.from(`\0${cfg.user}\0${cfg.pass}`).toString('base64')}`, [235], { secret: true })
+      else if (mech.includes('LOGIN')) {
+        await sess.cmd('AUTH LOGIN', [334], { secret: true })
+        await sess.cmd(Buffer.from(cfg.user).toString('base64'), [334], { secret: true })
+        await sess.cmd(Buffer.from(cfg.pass).toString('base64'), [235], { secret: true })
+      } else throw new SmtpError('the server offers no supported AUTH mechanism (PLAIN, LOGIN)', false)
+    }
+    await sess.cmd(`MAIL FROM:<${msg.from}>`, [250])
+    await sess.cmd(`RCPT TO:<${msg.to}>`, [250, 251])
+    await sess.cmd('DATA', [354])
+    const data = msg.data.split('\r\n').map((l) => (l.startsWith('.') ? `.${l}` : l)).join('\r\n')
+    sess.sock.write(`${data}${data.endsWith('\r\n') ? '' : '\r\n'}.\r\n`)
+    const done = await sess.reply()
+    if (done.code !== 250) throw new SmtpError(`message rejected: ${done.code} ${done.lines[0] ?? ''}`.slice(0, 200), done.code >= 400 && done.code < 500, done.code)
+    sess.sock.end('QUIT\r\n') // accepted: say goodbye politely, and make sure the socket goes away even if the server does not hang up
+    setTimeout(() => sess.close(), 1_000).unref()
+    delivered = true
+  } finally { if (!delivered) sess.close() }
+}
+
 /**
- * Default mailer. `ctx.mailer.send({ to, subject, text, tags? })` returns a promise. There is no SMTP transport in this
- * zero-dependency build: assign your own object with the same `send` to `ctx.mailer` (before requests are served) to
- * deliver real mail. Without a transport mail is dropped, or kept in a 200-entry in-memory outbox when RD_DEV_OUTBOX=1
+ * SMTP mailer: bounded queue (500), 3 parallel connections, 3 retries with backoff for transient failures (4xx, network).
+ * TLS: smtps:// or STARTTLS, certificates always verified (cfg.ca adds a private CA). Credentials and mail are never sent in clear text
+ * except to a loopback relay or with allowPlaintext. `send()` resolves when the server accepted the message.
+ */
+export function createSmtpTransport(cfg) {
+  const retryDelays = cfg.retryDelaysMs ?? [5_000, 30_000, 120_000]
+  const maxParallel = cfg.maxParallel ?? 3
+  const queue = []
+  let active = 0
+  const from = parseMailbox(cfg.from)
+  const domain = from.addr.split('@')[1]
+  const pump = () => {
+    while (active < maxParallel && queue.length) {
+      const job = queue.shift()
+      active++
+      attempt(job).finally(() => { active--; pump() })
+    }
+  }
+  async function attempt(job) {
+    for (let n = 0; ; n++) {
+      try {
+        await smtpDeliver(cfg, job.mail)
+        return job.resolve({ queued: true, delivered: true, attempts: n + 1 })
+      } catch (e) {
+        if (!(e instanceof SmtpError) || !e.transient || n >= retryDelays.length) {
+          return job.reject(e instanceof SmtpError ? e : new SmtpError(`mail delivery failed: ${e.message}`, false))
+        }
+        await new Promise((r) => { const t = setTimeout(r, retryDelays[n]); t.unref?.() })
+      }
+    }
+  }
+  return {
+    name: 'smtp',
+    from: from.addr,
+    queued: () => queue.length + active,
+    send(msg) {
+      return new Promise((resolve, reject) => {
+        if (queue.length >= 500) return reject(new SmtpError('mail queue is full', true))
+        let mail
+        try { mail = buildMessage({ from: cfg.from, to: msg.to, subject: msg.subject.slice(0, 200), text: msg.text.slice(0, 100_000), host: domain }) } catch (e) { return reject(new SmtpError(`invalid message: ${e.message}`, false)) }
+        queue.push({ mail, resolve, reject })
+        pump()
+      })
+    },
+  }
+}
+
+/**
+ * Default mailer. `ctx.mailer.send({ to, subject, text, tags? })` returns a promise. With RD_SMTP_URL (+ RD_MAIL_FROM) mail goes out over
+ * SMTP; assign your own object with the same `send` to `ctx.mailer` to use another transport. Without any transport mail is dropped
+ * (warned once), and with RD_DEV_OUTBOX=1 every message is also kept in a 200-entry in-memory outbox
  * (readable via GET /api/dev/outbox from loopback only - development only!).
  */
 function makeMailer(st) {
+  let smtp = null
+  let configError = null
+  try {
+    const cfg = smtpConfigFromEnv()
+    if (cfg) smtp = createSmtpTransport(cfg)
+  } catch (e) {
+    configError = e.message
+    console.error(`[rd-cloude] mail transport misconfigured: ${e.message}`)
+  }
   return {
-    transport: 'dev-outbox',
+    transport: smtp ? 'smtp' : configError ? 'misconfigured' : 'dev-outbox',
     async send(msg) {
       if (!msg || typeof msg.to !== 'string' || typeof msg.subject !== 'string' || typeof msg.text !== 'string') throw new Error('mail needs to, subject and text')
       if (process.env.RD_DEV_OUTBOX === '1') {
         st.outbox.push({ id: crypto.randomUUID(), at: iso(st.now()), to: msg.to, subject: msg.subject.slice(0, 200), text: msg.text.slice(0, 10_000), tags: msg.tags ?? {} })
         if (st.outbox.length > 200) st.outbox.shift()
-      } else if (!st.mailWarned) {
+      }
+      if (configError) throw new Error(`mail transport misconfigured: ${configError}`)
+      if (smtp) return smtp.send(msg)
+      if (process.env.RD_DEV_OUTBOX !== '1' && !st.mailWarned) {
         st.mailWarned = true
-        console.warn('[rd-cloude] no mail transport configured: outgoing email is discarded (set ctx.mailer, or RD_DEV_OUTBOX=1 for development)')
+        console.warn('[rd-cloude] no mail transport configured: outgoing email is discarded (set RD_SMTP_URL + RD_MAIL_FROM, assign ctx.mailer, or RD_DEV_OUTBOX=1 for development)')
       }
       return { queued: true }
     },

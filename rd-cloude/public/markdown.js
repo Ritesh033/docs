@@ -12,7 +12,9 @@
 const MAX_INPUT = 400_000
 const MAX_DEPTH = 8 // nested quotes / lists
 const MAX_INLINE_DEPTH = 8
-const LOOKAHEAD = 4000 // how far an emphasis opener searches for its closer (keeps pathological input linear-ish)
+const LOOKAHEAD = 4000 // how far an emphasis opener searches for its closer
+const SCAN_BUDGET = 150_000 // characters of look-ahead one paragraph may spend on unmatched openers: past it they are literal text (no quadratic blow-up)
+const MAX_TAIL = 2200 // a link destination plus title never needs more than this
 
 /* ----------------------------------------------------------------------------------------- urls */
 
@@ -34,10 +36,13 @@ export function safeUrl(raw) {
 const PUNCT = /[!-/:-@[-`{-~]/
 const isAlnum = (c) => c !== undefined && /[\p{L}\p{N}]/u.test(c)
 
-function findClosingBracket(s, i) {
+function findClosingBracket(s, i, budget) {
   // s[i] === '[': index of the matching ']' (balanced, skipping escapes and code spans) or -1
+  if (budget.n <= 0) return -1
   let depth = 0
-  for (let j = i; j < Math.min(s.length, i + 2000); j++) {
+  const end = Math.min(s.length, i + 2000)
+  budget.n -= end - i
+  for (let j = i; j < end; j++) {
     const c = s[j]
     if (c === '\\') { j++; continue }
     if (c === '`') {
@@ -60,14 +65,14 @@ function parseLinkTail(s, i) {
   while (s[j] === ' ' || s[j] === '\n') j++
   let href = ''
   if (s[j] === '<') {
-    const e = s.indexOf('>', j)
-    if (e === -1 || s.slice(j, e).includes('\n')) return null
-    href = s.slice(j + 1, e)
-    j = e + 1
+    const rel = s.slice(j, j + MAX_TAIL).indexOf('>')
+    if (rel === -1 || s.slice(j, j + rel).includes('\n')) return null
+    href = s.slice(j + 1, j + rel)
+    j += rel + 1
   } else {
     let depth = 0
     const start = j
-    for (; j < s.length; j++) {
+    for (; j < Math.min(s.length, start + MAX_TAIL); j++) {
       const c = s[j]
       if (c === '\\') { j++; continue }
       if (c === ' ' || c === '\n') break
@@ -80,10 +85,10 @@ function parseLinkTail(s, i) {
   let title = ''
   if (s[j] === '"' || s[j] === "'" || s[j] === '(') {
     const q = s[j] === '(' ? ')' : s[j]
-    const e = s.indexOf(q, j + 1)
-    if (e === -1) return null
-    title = s.slice(j + 1, e)
-    j = e + 1
+    const rel = s.slice(j + 1, j + 1 + MAX_TAIL).indexOf(q)
+    if (rel === -1) return null
+    title = s.slice(j + 1, j + 1 + rel)
+    j += rel + 2
     while (s[j] === ' ' || s[j] === '\n') j++
   }
   if (s[j] !== ')') return null
@@ -92,7 +97,7 @@ function parseLinkTail(s, i) {
 
 const trailingPunct = /[.,;:!?'")\]}>]+$/
 
-export function parseInline(s, depth = 0) {
+export function parseInline(s, depth = 0, budget = { n: SCAN_BUDGET }) {
   const out = []
   let buf = ''
   const flush = () => { if (buf) { out.push({ t: 'text', v: buf }); buf = '' } }
@@ -122,7 +127,7 @@ export function parseInline(s, depth = 0) {
     if ((c === '[' || (c === '!' && s[i + 1] === '[')) && depth < MAX_INLINE_DEPTH) {
       const image = c === '!'
       const open = image ? i + 1 : i
-      const close = findClosingBracket(s, open)
+      const close = findClosingBracket(s, open, budget)
       if (close !== -1 && s[close + 1] === '(') {
         const tail = parseLinkTail(s, close + 1)
         if (tail) {
@@ -130,8 +135,8 @@ export function parseInline(s, depth = 0) {
           const label = s.slice(open + 1, close)
           const href = safeUrl(tail.href)
           if (image) out.push({ t: 'link', href, title: tail.title, image: true, c: [{ t: 'text', v: `${label || 'image'} (image)` }] })
-          else if (href) out.push({ t: 'link', href, title: tail.title, c: parseInline(label, depth + 1) })
-          else out.push(...parseInline(label, depth + 1)) // unsafe target: keep the label, drop the link
+          else if (href) out.push({ t: 'link', href, title: tail.title, c: parseInline(label, depth + 1, budget) })
+          else out.push(...parseInline(label, depth + 1, budget)) // unsafe target: keep the label, drop the link
           i = tail.end
           continue
         }
@@ -157,7 +162,7 @@ export function parseInline(s, depth = 0) {
       while (s[i + n] === c) n++
       const prev = s[i - 1]
       const marker = c === '~' ? (n >= 2 ? 2 : 0) : Math.min(n, 3)
-      if (marker && s[i + n] !== undefined && !/\s/.test(s[i + n]) && !(c === '_' && isAlnum(prev))) {
+      if (marker && budget.n > 0 && s[i + n] !== undefined && !/\s/.test(s[i + n]) && !(c === '_' && isAlnum(prev))) {
         // find a closer of the same length that is not preceded by whitespace
         const closer = c.repeat(marker)
         const limit = Math.min(s.length, i + n + LOOKAHEAD)
@@ -171,9 +176,10 @@ export function parseInline(s, depth = 0) {
           if (before !== undefined && !/\s/.test(before) && before !== '\\' && !(c === '_' && isAlnum(after)) && s[k + marker] !== c && k > i + marker - 1) { found = k; break }
           j = k + 1
         }
+        budget.n -= (found === -1 ? limit : found) - i
         if (found !== -1) {
           flush()
-          const inner = parseInline(s.slice(i + marker, found), depth + 1)
+          const inner = parseInline(s.slice(i + marker, found), depth + 1, budget)
           out.push(c === '~' ? { t: 'del', c: inner } : marker === 1 ? { t: 'em', c: inner } : marker === 2 ? { t: 'strong', c: inner } : { t: 'strong', c: [{ t: 'em', c: inner }] })
           i = found + marker
           continue
@@ -301,6 +307,7 @@ export function parseBlocks(lines, depth = 0) {
         if (t.length >= m[2].length && t[0] === m[2][0] && [...t].every((ch) => ch === m[2][0])) { closed = true; i++; break }
         body.push(indent ? lines[i].replace(new RegExp(`^ {0,${indent}}`), '') : lines[i])
       }
+      if (!closed && body.length && body.at(-1) === '') body.pop() // a streamed, still-open fence ends with the newline that precedes the next token
       const lang = (info.split(/\s+/)[0] || '').replace(/^\{?\.?/, '').replace(/[^\w+#.-]/g, '').slice(0, 24).toLowerCase()
       const title = /title\s*=\s*"([^"]{1,100})"/.exec(info)?.[1] ?? null
       blocks.push({ t: 'code', lang, title, text: body.join('\n'), closed })
@@ -564,6 +571,7 @@ function renderInline(nodes, opts) {
     else if (n.t === 'em') frag.append(el('em', '', renderInline(n.c, opts)))
     else if (n.t === 'del') frag.append(el('del', '', renderInline(n.c, opts)))
     else if (n.t === 'link') {
+      if (!n.href) { frag.append(el('span', 'ai-md-noimg', renderInline(n.c, opts))); continue } // an image with an unusable address: show its alt text only
       const a = el('a', 'ai-md-link', renderInline(n.c, opts))
       a.href = n.href // already validated by safeUrl()
       a.target = '_blank'

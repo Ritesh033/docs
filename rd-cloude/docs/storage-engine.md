@@ -24,7 +24,7 @@ All synchronous. Collections are created on first write; **prefix yours with you
 ```js
 db.insert(col, doc)                // -> row {id, createdAt, ...doc}. Explicit id allowed; a duplicate id throws (code EDBDUPLICATE)
 db.get(col, id)                    // -> row | null            (the live object, not a copy)
-db.find(col, pred = all)           // -> rows in insertion order; pred(row, index)
+db.find(col, pred = all)           // -> rows in insertion order; pred(row, index). Visits only rows that existed when it started
 db.findOne(col, pred)              // -> row | null
 db.count(col, pred?)               // O(1) without pred
 db.update(col, id, patch)          // -> row | null. Sets updatedAt. `id` in the patch is ignored; a value of `undefined` unsets the field
@@ -196,6 +196,9 @@ Takeover goes through a `LOCK.claim` mutex so two starters cannot both win. The 
 lease/3 and checks its nonce; if another process took it over (event loop frozen > lease), the engine stops writing
 (`EDBFAILED`) instead of corrupting the data. `RD_FORCE_UNLOCK=1` overrides a live lock (operator decision, logged loudly).
 Symlinked paths to the same directory resolve to one lock. The lock is released by `close()` and, as a best effort, on process exit.
+Containers: after a hard crash, a replacement container with a *different hostname* cannot prove the old pid is dead (pids are per
+host), so it waits out the lease: startup fails with `EDBLOCKED` for up to `RD_LOCK_LEASE_MS` (30 s) and succeeds once the supervisor
+retries. A replacement with the same hostname (StatefulSet pod, `docker restart`) takes over immediately.
 
 ## `server.js`
 
@@ -249,7 +252,7 @@ node scripts/backup.mjs restore <backupDir> [<dataDir>] [--force]
 * Blobs are read and written whole (no streaming API); `getBlob` buffers the file, which is fine for the 25 MB request-body limit.
   Do not mutate a Buffer returned by `getBlob` in memory mode (it is the stored copy).
 * Indexes cover top-level fields only (no `a.b` paths).
-* Measured on the dev VM (`batch` mode, small ~150-byte rows): ~80k inserts/s, ~1.5M indexed lookups/s, log replay ~180k records/s (200k records / 37 MB in 1.1 s), a 100k-row snapshot (16 MB) is written in ~150 ms.
+* Measured on a shared dev VM (`batch` mode, small ~150-byte rows; expect +-30% depending on load): 60-80k inserts/s, ~1.4M indexed lookups/s, log replay ~180k records/s (200k records / 37 MB in 1.1 s), a 100k-row snapshot (16 MB) is written in 150-250 ms.
 
 ## Security notes
 
@@ -269,10 +272,12 @@ node scripts/backup.mjs restore <backupDir> [<dataDir>] [--force]
 * In-place row mutation (without `update()`) is not durable until the next snapshot; this cannot be detected cheaply, so it is documented, not prevented.
 * Long-lived responses (SSE) are cut when the drain timeout expires: there is no earlier "draining" signal to modules yet.
 * Windows is untested (directory fsync is skipped where unsupported).
+* Snapshots, `backup()` and blob verification are synchronous and proportional to the data size; a multi-GB dataset needs a different
+  architecture (this engine keeps everything in RAM by design).
 
 ## Tests
 
-`node --test test/db.test.js`: document semantics, torn tails at every byte offset, random log/snapshot/blob damage (always a prefix
+`node --test test/db.test.js` (about 45 s): document semantics, torn tails at every byte offset, random log/snapshot/blob damage (always a prefix
 of history or a loud refusal), `kill -9` of a writer, lock contention across processes and stale-lock cases, fenced lock loss,
 compaction and crash-during-compaction, generation fallback, index consistency under 4000 random ops with rollbacks, transactions,
 legacy migration, blob corruption/GC, backup/verify/restore (library and CLI), server config validation and lifecycle

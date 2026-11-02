@@ -148,6 +148,28 @@ describe('document API (memory mode keeps the original semantics)', () => {
     assert.equal(db.count('c'), 4)
   })
 
+  test('a predicate that inserts into the collection it scans terminates and never sees its own inserts (Array#filter semantics)', () => {
+    for (const mode of ['memory', 'persistent']) {
+      const db = mode === 'memory' ? createDb() : open(tmpdir())
+      for (let i = 0; i < 3; i++) db.insert('c', { i })
+      const guard = (n) => { if (n > 100) throw new Error('runaway scan') }
+      let calls = 0
+      const all = db.find('c', () => { guard(++calls); db.insert('c', { spawned: true }); return true })
+      assert.equal(calls, 3, mode)
+      assert.equal(all.length, 3, mode)
+      assert.equal(db.count('c'), 6, mode)
+      calls = 0
+      assert.equal(db.findOne('c', (r) => { guard(++calls); db.insert('c', { spawned: true }); return r.spawned === 'never' }), null, mode)
+      assert.equal(calls, 6, mode)
+      calls = 0
+      assert.equal(db.count('c', () => { guard(++calls); db.insert('c', { spawned: true }); return true }), 12, mode)
+      assert.equal(calls, 12, mode)
+      calls = 0
+      assert.equal(db.removeWhere('c', (r) => { guard(++calls); db.insert('c', { spawned: true }); return r.i === 0 }), 1, mode)
+      db.close()
+    }
+  })
+
   test('record size is bounded', () => {
     const db = createDb()
     assert.throws(() => db.insert('c', { s: 'x'.repeat(65 * 1024 * 1024) }), RangeError)
@@ -1897,9 +1919,12 @@ describe('server.js configuration', () => {
     bad({ RD_SHUTDOWN_TIMEOUT_MS: '-5' }, /RD_SHUTDOWN_TIMEOUT_MS/)
     bad({ RD_SHUTDOWN_TIMEOUT_MS: '9999999' }, /RD_SHUTDOWN_TIMEOUT_MS/)
     bad({ RD_CRASH_ON_UNHANDLED: 'maybe' }, /RD_CRASH_ON_UNHANDLED/)
-    const saved = process.env.RD_FSYNC
-    process.env.RD_FSYNC = 'sometimes'
-    try { bad({ PORT: 'nope' }, /PORT[\s\S]*RD_FSYNC/) } finally { if (saved === undefined) delete process.env.RD_FSYNC; else process.env.RD_FSYNC = saved }
+    // engine settings are validated against the env that was passed in (not just process.env), and reported with the other problems
+    bad({ PORT: 'nope', RD_FSYNC: 'sometimes' }, /PORT[\s\S]*RD_FSYNC/)
+    bad({ RD_KEEP_GENERATIONS: '0' }, /RD_KEEP_GENERATIONS/)
+    bad({ RD_LOCK_LEASE_MS: 'soon' }, /RD_LOCK_LEASE_MS/)
+    bad({ RD_RECOVER: 'repair' }, /RD_RECOVER/)
+    assert.equal(ok({ RD_FSYNC: 'ALWAYS', RD_KEEP_GENERATIONS: '3' }).dataDir.length > 0, true)
     const file = path.join(tmpdir(), 'afile')
     fs.writeFileSync(file, 'x')
     bad({ RD_DATA_DIR: file }, /not a directory/)

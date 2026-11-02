@@ -10,6 +10,7 @@ const GENESIS = '0'.repeat(64)
 const SENSITIVE_PATH = /^\/api\/(auth|keys|account|orgs)(\/|$)|\/(shares?|invites?|members?|publish|permissions?|tokens?|secrets?|password|roles?|transfer)(\/|$)/i
 const REDACT = /^(pass|secret|token|code|authorization|cookie|api_?key|hash|totp|otp|private)/i
 const SKIP_KEYS = new Set(['__proto__', 'constructor', 'prototype'])
+const REQUEST_ID_OK = /^[A-Za-z0-9._:=+/-]{1,64}$/ // same rule security.js applies to the x-request-id header
 
 const canon = (v) => {
   if (Array.isArray(v)) return v.map(canon)
@@ -72,7 +73,7 @@ export async function register(r, db, ctx) {
       let s = stateFor(userId)
       const e = {
         userId, seq: (s?.seq ?? 0) + 1, ts: new Date(st.now()).toISOString(), action, resource: normResource(ev.resource),
-        ip: typeof ev.ip === 'string' ? ev.ip.slice(0, 64) : null, requestId: typeof ev.requestId === 'string' ? ev.requestId.slice(0, 64) : null,
+        ip: typeof ev.ip === 'string' ? ev.ip.slice(0, 64) : null, requestId: typeof ev.requestId === 'string' && REQUEST_ID_OK.test(ev.requestId) ? ev.requestId : null,
         meta: cleanMeta(ev.meta), prev: s?.hash ?? GENESIS,
       }
       if (JSON.stringify(e.meta).length > 2000) e.meta = { truncated: true }
@@ -126,13 +127,12 @@ export async function register(r, db, ctx) {
   }
 
   /* ------------------------------------------------------------- sources */
-  const explicit = new Set() // request ids that already produced an explicit entry (so auto-capture does not double-log)
+  // One request must not yield an explicit AND an automatic entry. Requests are matched by identity (the `req` object an emitter passes
+  // along), never by the client-chosen x-request-id: a client could otherwise reuse the id of an earlier explicit entry to silence capture.
+  const explicit = new WeakSet()
   ctx.audit = (userId, action, resource, meta, extra) => ctx.events.emit('audit', { userId, action, resource, meta, ...extra })
   ctx.events.on('audit', (ev) => {
-    if (ev?.requestId) {
-      explicit.add(ev.requestId)
-      if (explicit.size > 2000) explicit.delete(explicit.values().next().value)
-    }
+    if (ev?.req && typeof ev.req === 'object') explicit.add(ev.req)
     append(ev)
   })
   ctx.events.on('account.deleted', ({ userId }) => {
@@ -147,7 +147,7 @@ export async function register(r, db, ctx) {
   ctx.hooks.onRequestEnd.push((info) => {
     try {
       const { user, req, status, pattern } = info
-      if (!user || !pattern || !pattern.startsWith('/api/') || explicit.has(info.requestId)) return
+      if (!user || !pattern || !pattern.startsWith('/api/') || explicit.has(info.req)) return
       const method = req.method
       const mutating = method !== 'GET' && method !== 'HEAD' && method !== 'OPTIONS'
       let action = null

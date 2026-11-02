@@ -3,7 +3,11 @@
 import { test, describe, before, after } from 'node:test'
 import assert from 'node:assert/strict'
 import http from 'node:http'
+import fs from 'node:fs'
+import path from 'node:path'
+import { fileURLToPath } from 'node:url'
 import { startTestApp } from './helpers.js'
+import { parseMarkdown, parseInline, safeUrl, tokenizeCode } from '../public/markdown.js'
 import {
   createAnthropicProvider, createStubProvider, parseSse, collect, estimateTokens, loadModelCatalogue, ProviderError, selectProvider, DEFAULT_MODELS,
 } from '../src/providers.js'
@@ -157,6 +161,10 @@ describe('artifact extraction', () => {
     assert.deepEqual(a.map((x) => x.type), ['html', 'code', 'code'])
     assert.equal(a[1].title, 'T')
     assert.equal(a[2].language, 'rust')
+    // made-up titles are flagged so they are never used to merge unrelated blocks; real ones are not
+    assert.deepEqual(a.map((x) => x.generic), [true, false, true])
+    assert.deepEqual(a.map((x) => x.title), ['HTML page', 'T', 'Rust snippet'])
+    assert.equal(extractArtifacts('```html\n<title>My page</title>\n<p>a</p>\n<p>b</p>\n```')[0].generic, false)
   })
   test('caps count and size', () => {
     const many = Array.from({ length: 30 }, (_, i) => `\`\`\`js title="t${i}"\nx\n\`\`\``).join('\n')
@@ -186,6 +194,13 @@ describe('titles', () => {
     assert.equal(heuristicTitle('```js\ncode\n```'), 'New chat')
     assert.equal(heuristicTitle(''), 'New chat')
     assert.match(heuristicTitle('A very long sentence without punctuation that keeps on going and going forever'), /…$/)
+  })
+  test('markup is stripped but arithmetic operators and snake_case survive', () => {
+    assert.equal(heuristicTitle('Calculate (23 * 7) + sqrt(144)'), 'Calculate (23 * 7) + sqrt(144)')
+    assert.equal(heuristicTitle('**Bold** and _it_ and *x*'), 'Bold and it and x')
+    assert.equal(heuristicTitle('# Heading here\nbody'), 'Heading here body')
+    assert.equal(heuristicTitle('> quoted text'), 'quoted text')
+    assert.equal(heuristicTitle('snake_case_word is fine'), 'snake_case_word is fine')
   })
 })
 
@@ -1587,6 +1602,40 @@ describe('AI HTTP API: projects, prompts, search', () => {
       assert.equal(p3.nextCursor, null)
       assert.equal(new Set([...p1.results, ...p2.results, ...p3.results].map((x) => x.conversationId)).size, 5)
     })
+    test('index budgets: a huge account is indexed newest-first and flagged partial; the global budget evicts and rebuilds without leaking', async () => {
+      const env = (k, v) => { if (v === undefined) delete process.env[k]; else process.env[k] = v }
+      try {
+        env('RD_AI_INDEX_USER_POSTINGS', '300')
+        const u = await t.register('budget@rd.dev')
+        const base = Date.parse('2026-01-01T00:00:00Z')
+        for (let i = 0; i < 40; i++) {
+          const c = t.db.insert('conversations', { userId: u.user.id, title: `Old ${i}`, activeLeafId: null, lastMessageAt: new Date(base + i * 60_000).toISOString() })
+          const words = Array.from({ length: 15 }, (_, k) => `term${i}x${k}`).join(' ')
+          t.db.insert('messages', { conversationId: c.id, userId: u.user.id, role: 'user', content: `${words} budgetmark`, parentId: null })
+        }
+        const r = await search('budgetmark', '&limit=100', u)
+        assert.equal(r.status, 200)
+        assert.equal(r.data.partial, true)
+        assert.ok(r.data.results.length > 0 && r.data.results.length < 40, `indexed ${r.data.results.length} of 40`)
+        assert.ok(r.data.results.some((x) => x.title === 'Old 39'), 'newest conversations come first')
+        assert.ok(!r.data.results.some((x) => x.title === 'Old 0'), 'the oldest did not fit')
+        // global budget: two users' indexes do not fit together, so the least recently used one is dropped and rebuilt on demand
+        env('RD_AI_INDEX_USER_POSTINGS')
+        env('RD_AI_INDEX_MAX_POSTINGS', '200')
+        const a = await t.register('evict-a@rd.dev')
+        const b = await t.register('evict-b@rd.dev')
+        for (const [who, word] of [[a, 'alphaonly'], [b, 'betaonly']]) {
+          const c = t.db.insert('conversations', { userId: who.user.id, title: `T ${word}`, activeLeafId: null })
+          for (let i = 0; i < 6; i++) t.db.insert('messages', { conversationId: c.id, userId: who.user.id, role: 'user', content: `${word} ${Array.from({ length: 30 }, (_, k) => `w${i}n${k}`).join(' ')}`, parentId: null })
+        }
+        for (let round = 0; round < 3; round++) {
+          assert.equal((await search('alphaonly', '', a)).data.results.length, 1)
+          assert.equal((await search('betaonly', '', b)).data.results.length, 1)
+          assert.equal((await search('betaonly', '', a)).data.results.length, 0, 'no cross-user leakage')
+          assert.equal((await search('alphaonly', '', b)).data.results.length, 0)
+        }
+      } finally { env('RD_AI_INDEX_USER_POSTINGS'); env('RD_AI_INDEX_MAX_POSTINGS') }
+    })
     test('built lazily from existing data after a restart', async () => {
       const u = await t.register('restarted@rd.dev')
       const c = t.db.insert('conversations', { userId: u.user.id, title: 'Pre-existing', activeLeafId: null })
@@ -1629,6 +1678,23 @@ describe('AI HTTP API: artifacts, sharing, isolation', () => {
         const x = await send(c.id, `${kind} example`)
         assert.equal(x.data.artifacts[0].type, type, kind)
       }
+    })
+    test('untitled code blocks never merge into each other; an identical block (regenerated reply) is not duplicated', async () => {
+      const c = await newConvo()
+      const block = (n) => '```python\n' + Array.from({ length: 9 }, (_, i) => `x${n}_${i} = ${i}`).join('\n') + '\n```'
+      let reply = block(1)
+      t.ctx.ai.provider = { name: 'fixed', live: false, async *stream() { yield { type: 'text', text: reply }; yield { type: 'usage', inputTokens: 1, outputTokens: 1 }; yield { type: 'stop', reason: 'end_turn' } } }
+      try {
+        const a = (await send(c.id, 'one')).data.artifacts[0]
+        reply = block(2)
+        const b = (await send(c.id, 'two')).data.artifacts[0]
+        assert.deepEqual([a.title, a.action, b.title, b.action], ['Python snippet', 'created', 'Python snippet 2', 'created'])
+        assert.notEqual(a.id, b.id)
+        reply = block(2) // the same code again (what regenerate produces)
+        const again = (await send(c.id, 'three')).data.artifacts[0]
+        assert.deepEqual([again.id, again.action], [b.id, 'unchanged'])
+        assert.equal((await alice.call('GET', `/api/artifacts?conversationId=${c.id}`)).data.artifacts.length, 2)
+      } finally { t.ctx.ai.provider = null }
     })
     test('SSE announces artifacts', async () => {
       const c = await newConvo()
@@ -1884,6 +1950,28 @@ describe('AI HTTP API: artifacts, sharing, isolation', () => {
       assert.equal((await alice.call('GET', `/api/conversations/${c.id}`)).status, 200)
       assert.equal((await bob.call('POST', '/api/conversations', { body: { projectId: 'pro_x' } })).status, 404)
     })
+    test('account export and deletion cover the assistant data, including image blobs', async () => {
+      const u = await t.register('acct-ai@rd.dev', 'password123')
+      const p = (await u.call('POST', '/api/projects', { body: { name: 'P' } })).data
+      await u.call('POST', `/api/projects/${p.id}/files`, { body: { name: 'k.txt', content: 'knowledge' } })
+      await u.call('POST', '/api/prompts', { body: { title: 'x', content: 'y' } })
+      const c = (await u.call('POST', '/api/conversations', { body: {} })).data
+      assert.equal((await u.call('POST', `/api/conversations/${c.id}/messages`, { body: { content: 'hi', attachments: [{ type: 'image', name: 'a.png', data: PNG.toString('base64') }] } })).status, 201)
+      await u.call('POST', `/api/conversations/${c.id}/share`)
+      const blobId = t.db.find('messages', (m) => m.conversationId === c.id)[0].attachments[0].blobId
+      assert.ok(t.db.getBlob(blobId))
+      const ex = await u.call('GET', '/api/account/export')
+      assert.equal(ex.status, 200)
+      const text = typeof ex.data === 'string' ? ex.data : Buffer.isBuffer(ex.data) ? ex.data.toString() : JSON.stringify(ex.data)
+      for (const col of ['ai_knowledge', 'ai_prompts', 'ai_shares', 'messages']) assert.ok(text.includes(`"${col}"`), col)
+      assert.ok(!text.includes(blobId), 'blob ids are not exported')
+      assert.equal((await u.call('DELETE', '/api/account', { body: { password: 'password123' } })).status, 200)
+      for (const col of ['conversations', 'messages', 'projects', 'ai_knowledge', 'ai_prompts', 'ai_shares']) assert.equal(t.db.find(col, (r) => r.userId === u.user.id).length, 0, col)
+      assert.equal(t.db.find('messages', (m) => m.conversationId === c.id).length, 0)
+      let left = null
+      try { left = t.db.getBlob(blobId) } catch { left = null }
+      assert.ok(!left, 'image blob removed with the account')
+    })
     test('API keys with a narrow scope cannot use the assistant', async () => {
       // scope rules are the security module's job; here we just make sure a drive-only key is refused on the new routes
       const key = await alice.call('POST', '/api/keys', { body: { name: 'drive-only', scopes: ['drive'] } })
@@ -1896,5 +1984,158 @@ describe('AI HTTP API: artifacts, sharing, isolation', () => {
       const ai = await alice.call('POST', '/api/keys', { body: { name: 'ai-only', scopes: ['ai'] } })
       for (const p of ['/api/conversations', '/api/models', '/api/search?q=x', '/api/prompts']) assert.equal((await t.call('GET', p, { token: ai.data.secret })).status, 200, p)
     })
+  })
+})
+
+/* ================================================================================================ markdown (pure parser) */
+
+describe('markdown: parser, URL policy, highlighter', () => {
+  const kinds = (blocks) => blocks.map((b) => b.t)
+  const inlineText = (nodes) => nodes.map((n) => (n.t === 'text' ? n.v : n.c ? inlineText(n.c) : n.v ?? '')).join('')
+
+  test('safeUrl only lets absolute http(s) and mailto through', () => {
+    const ok = ['http://ok.com', 'https://ok.com/a?b=c#d', 'mailto:a@b.co', 'HTTPS://OK.COM']
+    for (const u of ok) assert.ok(safeUrl(u), u)
+    const bad = ['javascript:alert(1)', 'JaVaScRiPt:alert(1)', ' javascript:alert(1)', 'java\tscript:alert(1)', 'data:text/html,<script>', 'vbscript:x', 'file:///etc/passwd',
+      '//evil.com', '/relative', 'relative', '', '   ', 'http://a.com/a b', 'http://a.com\\@evil.com', '\u0001http://x.com', 'mailto:a b@c.d', 'x'.repeat(3000), null, undefined, 42, {}]
+    for (const u of bad) assert.equal(safeUrl(u), null, String(u).slice(0, 40))
+  })
+
+  test('block structure: headings, lists, tables, quotes, fences, tasks', () => {
+    const md = ['# Title', '', 'Para with **bold**, *em*, ~~gone~~ and `code`.', '', '- a', '- b', '  - nested', '', '1. one', '2. two', '', '> quote', '', '| h1 | h2 |', '| -- | --: |', '| 1 | 2 |', '', '```js title="x.js"', 'const a = 1', '```', '', '- [x] done', '- [ ] todo', '', '---'].join('\n')
+    const b = parseMarkdown(md)
+    assert.deepEqual(kinds(b), ['h', 'p', 'list', 'list', 'quote', 'table', 'code', 'list', 'hr'])
+    assert.equal(b[0].level, 1)
+    assert.deepEqual(b[2].items.map((i) => inlineText(i.blocks[0].c)), ['a', 'b'])
+    assert.equal(b[3].ordered, true)
+    assert.deepEqual(b[5].align, [null, 'right'])
+    assert.deepEqual([b[6].lang, b[6].title, b[6].text, b[6].closed], ['js', 'x.js', 'const a = 1', true])
+    assert.deepEqual(b[7].items.map((i) => i.task), [true, false])
+    const p = b[1].c.map((n) => n.t)
+    assert.ok(['strong', 'em', 'del', 'code'].every((t) => p.includes(t)))
+  })
+
+  test('an unterminated fence is kept (streaming) and flagged open', () => {
+    const [c] = parseMarkdown('```python\nprint(1)\n')
+    assert.equal(c.t, 'code')
+    assert.equal(c.closed, false)
+    assert.equal(c.text, 'print(1)')
+  })
+
+  test('raw HTML never becomes a node: angle brackets stay literal text', () => {
+    const payloads = ['<script>alert(1)</script>', '<img src=x onerror=alert(1)>', '<iframe srcdoc="x"></iframe>', '<a href="javascript:alert(1)">x</a>', '**<b onmouseover=x>y</b>**', '# <svg onload=alert(1)>']
+    for (const p of payloads) {
+      const walk = (nodes) => { for (const n of nodes) { assert.ok(['text', 'code', 'br', 'strong', 'em', 'del', 'link'].includes(n.t), `${p}: ${n.t}`); if (n.c) walk(n.c) } }
+      for (const b of parseMarkdown(p)) { if (b.c) walk(b.c); assert.ok(['p', 'h'].includes(b.t), `${p}: ${b.t}`) }
+    }
+    assert.match(inlineText(parseMarkdown('<script>x</script>')[0].c), /<script>x<\/script>/)
+  })
+
+  test('every link node carries a validated URL; unsafe targets keep only their label', () => {
+    const links = (md) => { const found = []; const walk = (nodes) => { for (const n of nodes) { if (n.t === 'link') found.push(n); if (n.c) walk(n.c) } }; for (const b of parseMarkdown(md)) { if (b.c) walk(b.c) } return found }
+    assert.equal(links('[x](javascript:alert(1))').length, 0)
+    assert.equal(links('[x](  JAVASCRIPT:alert(1))').length, 0)
+    assert.equal(links('[x](data:text/html;base64,AAAA)').length, 0)
+    assert.equal(links('[x](http://a.com "t")')[0].href, 'http://a.com/')
+    assert.equal(links('see https://example.com/a_(b), ok.')[0].href, 'https://example.com/a_(b)')
+    assert.equal(links('<mailto:a@b.co>')[0].href, 'mailto:a@b.co')
+    assert.equal(links('<a@b.co>')[0].href, 'mailto:a@b.co')
+    assert.equal(links('<javascript:alert(1)>').length, 0)
+    // images are never fetched: they become labelled links (or just text when the address is unusable)
+    const img = links('![alt](http://x/y.png)')[0]
+    assert.equal(img.image, true)
+    assert.equal(links('![alt](javascript:x)').length, 1)
+    assert.equal(links('![alt](javascript:x)')[0].href, null)
+  })
+
+  test('pathological input stays fast (no quadratic look-ahead) and never throws', () => {
+    const N = 60_000
+    const cases = {
+      brackets: '['.repeat(N), bracketParen: '[a]('.repeat(N / 5), starWords: '*a '.repeat(N / 3), underscores: '_a'.repeat(N / 2), ticks: '`'.repeat(N), lt: '<'.repeat(N),
+      autolink: '<http://'.repeat(N / 8), quotes: '> '.repeat(5000) + 'x', list: Array.from({ length: 2000 }, (_, i) => ' '.repeat(i % 40) + '- x').join('\n'),
+      table: '|a|b|\n|-|-|\n' + '|1|2|\n'.repeat(20_000), ladder: '*a **b ***c '.repeat(N / 12), linkTail: '[a](<'.repeat(N / 5), title: '[a](b "'.repeat(N / 7),
+    }
+    for (const [name, text] of Object.entries(cases)) {
+      const t0 = performance.now()
+      parseMarkdown(text)
+      const ms = performance.now() - t0
+      assert.ok(ms < 1500, `${name} took ${Math.round(ms)} ms`)
+    }
+    // oversized documents are cut with a visible marker
+    const big = parseMarkdown('x'.repeat(500_000))
+    assert.match(inlineText(big.at(-1).c), /truncated/)
+  })
+
+  test('random soup: no exceptions, bounded depth', () => {
+    let seed = 7
+    const rnd = () => (seed = (seed * 1103515245 + 12345) & 0x7fffffff) / 0x7fffffff
+    const alphabet = ['*', '_', '~', '`', '[', ']', '(', ')', '<', '>', '!', '\n', '\n\n', ' ', '-', '+', '1.', '#', '|', '\\', ':', '"', 'http://a.b', 'a', 'b', '  ', '\t', '=', '---', '```']
+    const depth = (nodes, d = 0) => nodes.reduce((m, n) => Math.max(m, n.c ? depth(n.c, d + 1) : d), d)
+    for (let k = 0; k < 1500; k++) {
+      const s = Array.from({ length: 1 + Math.floor(rnd() * 200) }, () => alphabet[Math.floor(rnd() * alphabet.length)]).join('')
+      const blocks = parseMarkdown(s)
+      for (const b of blocks) if (b.c) assert.ok(depth(b.c) <= 12)
+      parseInline(s)
+    }
+  })
+
+  test('syntax highlighting is lossless for every language, even on broken code', () => {
+    const langs = ['js', 'ts', 'python', 'sql', 'html', 'svg', 'css', 'json', 'yaml', 'bash', 'diff', 'c', 'go', 'rust', 'java', 'php', 'unknown', '']
+    const samples = ['const x = "unterminated\n/* open\n<script>alert(1)', 'def f(x):\n    """doc\n    return 1  # c', 'SELECT * FROM t WHERE a = \'x\' -- c', '<div class="a" id=b>text</div><!-- c', '{"a": [1, 2.5e3, null, true], "b": "x"}', '@@ -1,2 +1,2 @@\n-a\n+b', '']
+    for (const l of langs) for (const code of samples) assert.equal(tokenizeCode(code, l).map((t) => t[1]).join(''), code, `${l}: ${code.slice(0, 20)}`)
+    const toks = tokenizeCode('const a = 1 // hi', 'js')
+    assert.ok(toks.some(([c, t]) => c === 'kw' && t === 'const'))
+    assert.ok(toks.some(([c]) => c === 'com'))
+    assert.ok(toks.some(([c]) => c === 'num'))
+    // token classes are a closed set (they become CSS classes)
+    const ok = new Set([null, 'com', 'str', 'num', 'attr', 'var', 'key', 'kw', 'fn', 'ty', 'tag', 'add', 'del'])
+    for (const l of langs) for (const code of samples) for (const [c] of tokenizeCode(code, l)) assert.ok(ok.has(c), `${l}: ${c}`)
+    assert.equal(tokenizeCode('x'.repeat(200_000), 'js').length, 1) // too large to highlight: plain
+  })
+})
+
+/* ================================================================================================ UI static contract */
+
+describe('UI files follow the platform contract (CSP-clean, no HTML sinks, prefixed CSS)', () => {
+  const root = path.join(path.dirname(fileURLToPath(import.meta.url)), '..', 'public')
+  const read = (f) => fs.readFileSync(path.join(root, f), 'utf8')
+  const scripts = ['markdown.js', 'ui/chat.js', 'ui/projects.js', 'ui/artifacts.js']
+  const stylesheets = ['ui/ai.css', 'ui/chat.css']
+  const strip = (src) => src.replace(/\/\*[\s\S]*?\*\//g, '').replace(/(^|[^:'"`])\/\/[^\n]*/g, '$1')
+
+  test('no innerHTML-style sinks, eval, inline handlers or inline style attributes', () => {
+    for (const f of scripts) {
+      const src = strip(read(f))
+      for (const [re, what] of [
+        [/\.(innerHTML|outerHTML)\b/, 'innerHTML/outerHTML'], [/insertAdjacentHTML/, 'insertAdjacentHTML'], [/document\.write/, 'document.write'],
+        [/\beval\s*\(/, 'eval'], [/new\s+Function\b/, 'new Function'], [/\bsetTimeout\s*\(\s*['"`]/, 'string timer'], [/DOMParser/, 'DOMParser'],
+        [/setAttribute\(\s*['"]style['"]/, 'style attribute'], [/\bstyle\s*:\s*['"`]/, 'style string'], [/\bon[a-z]+\s*=\s*['"]/, 'inline handler attribute'],
+        [/allow-same-origin/, 'allow-same-origin'],
+      ]) assert.ok(!re.test(src), `${f} uses ${what}`)
+    }
+  })
+
+  test('the HTML preview iframe is sandboxed with allow-scripts only', () => {
+    const src = read('ui/artifacts.js')
+    assert.match(src, /setAttribute\('sandbox', 'allow-scripts'\)/)
+    assert.doesNotMatch(strip(src), /allow-same-origin/)
+    assert.match(src, /srcdoc/) // documented fallback
+  })
+
+  test('every CSS class selector is prefixed ai-', () => {
+    for (const f of stylesheets) {
+      const css = read(f).replace(/\/\*[\s\S]*?\*\//g, '')
+      const selectors = [...css.matchAll(/([^{}]+)\{/g)].map((m) => m[1].trim()).filter((s) => !s.startsWith('@'))
+      for (const sel of selectors) for (const m of sel.matchAll(/\.([A-Za-z_][\w-]*)/g)) assert.ok(m[1].startsWith('ai-'), `${f}: .${m[1]} in "${sel.slice(0, 60)}"`)
+      assert.ok(!/style\s*=/.test(css))
+    }
+  })
+
+  test('the UI modules declare the views they replace', () => {
+    for (const [f, ids] of [['ui/chat.js', ['chat']], ['ui/projects.js', ['projects', 'prompts']], ['ui/artifacts.js', ['artifacts']]]) {
+      const src = read(f)
+      assert.match(src, /export default \[/)
+      for (const id of ids) assert.match(src, new RegExp(`id: '${id}'`), `${f} declares ${id}`)
+    }
   })
 })

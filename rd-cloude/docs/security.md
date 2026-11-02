@@ -12,7 +12,7 @@ Zero dependencies (`node:crypto` only). Owners of this area: `src/auth.js` (iden
 | 2FA | TOTP (RFC 6238, verified against the RFC vectors), `otpauth://` URI, two-step login, 10 single-use recovery codes stored as keyed hashes |
 | Sessions | list / revoke one / revoke others, rotation on password change, idle (7 d) + absolute (30 d) expiry, max 10 per user |
 | Passwords | length 8-256, common-password denylist, reset by emailed single-use token, change with re-authentication |
-| Email | verification token at sign-up, pluggable `ctx.mailer`, dev outbox, notices for password / 2FA changes and for sign-ins from a new device or address |
+| Email | verification token at sign-up, pluggable `ctx.mailer` with a built-in SMTP client (STARTTLS / TLS), dev outbox, notices for password / 2FA changes and for sign-ins from a new device or address |
 | API keys | optional scopes and expiry, `lastUsedAt` / `lastUsedIp`, enforced centrally in `hooks.beforeRoute` |
 | Organizations | owner / admin / member / viewer, email invites, transfer, `canAccess()` for other modules |
 | Audit | per-user, HMAC hash-chained log fed by events and automatic request capture, cursor API, verification endpoint |
@@ -71,8 +71,10 @@ Scope model (`requiredScope()` in `src/auth.js`; longest path prefix wins, mappi
 * `read`/`write` cover every service **except** `account`, which needs `account` (or `account:read` for reads). So a CI key with
   `write` can neither mint keys nor touch credentials.
 * A service-scoped key does not reach unmapped (future) modules; global `read`/`write` do. Modules can map their own prefix:
-  `ctx.scopes.register('/api/widgets', 'storage')`.
-* `GET /api/me` works for every valid key. Static files and `/s/` share links are never key-scoped.
+  `ctx.scopes.register('/api/widgets', 'storage')`. Code that runs *before* `security.js` loads (core modules, files sorting before it) has no `ctx.scopes` yet and queues instead:
+  `(ctx.scopeRules ??= []).push(['/api/widgets', 'storage'])` (same for CSP: `(ctx.cspExtras ??= []).push(['frame-src', "'self'"])`); once loaded, pushing applies immediately.
+* `GET /api/me` works for every valid key. Static files and public routes (`/s/` share links) are never key-scoped; an *authenticated* route outside `/api/`
+  (a future module's own prefix) falls back to the global `read`/`write` scopes, so a service-scoped key cannot reach it.
 * A scoped key can only mint keys covered by its own scopes and not outliving it. Interactive actions (password change, 2FA,
   session revocation, account deletion) reject **all** API keys, including full-access ones.
 * Denied calls answer `403 API key scope insufficient: this endpoint needs "storage" (or "write")` and are audited.
@@ -83,7 +85,7 @@ Scope model (`requiredScope()` in `src/auth.js`; longest path prefix wins, mappi
 audit log, and every collection row owned by the caller (`userId`, plus `messages` via conversations and `shares` via files;
 other modules' collections are found through `db.collections()`). No credentials, no blob contents.
 `DELETE /api/account {password, code?}` (session only; the code is required when 2FA is on) removes every row owned by the
-user in all collections, their blobs, sessions, keys, tokens, audit log and organization memberships. Blocked with `409` while the
+user in all collections, their blobs (any property named `blobId`, `blobIds`, `blob`, `*BlobId` at any depth; a blob that a surviving row of anyone still references is kept), sessions, keys, tokens, audit log and organization memberships. Blocked with `409` while the
 user owns an organization that still has other members.
 
 Module hooks (events on `ctx.events`):
@@ -134,6 +136,8 @@ import { canAccess } from './orgs.js'          // or ctx.access.canAccess(userId
 canAccess(db, user.id, record, 'read' | 'write' | 'delete' | 'admin' | 'owner')
 ctx.access.orgRole(userId, orgId)   // 'owner' | 'admin' | 'member' | 'viewer' | null
 ctx.access.listOrgIds(userId)
+ctx.access.require(userId, record, 'write')   // returns record, or throws 404 (cannot read) / 403 (read-only role)
+ctx.access.filter(userId, rows, 'read')       // keeps personal rows of the user and rows of orgs where their role suffices
 ```
 
 No `orgId` = personal (only `userId`, all permissions). With `orgId`, access follows the caller's **current** role (viewer: read; member: +write;
@@ -150,9 +154,10 @@ Retention: 5000 entries/user (`RD_AUDIT_MAX_PER_USER`); the oldest 10 % are drop
 
 Query: `?action=auth.*` (trailing `*` = prefix) `&resource=` `&since=` `&until=` `&limit=` (<=200) `&cursor=` (opaque, newest first).
 
-Feeding it: `ctx.audit(userId, action, resource, meta)` or `ctx.events.emit('audit', {userId, action, resource, ip, meta})`. Action names are sanitised to
+Feeding it: `ctx.audit(userId, action, resource, meta, extra?)` or `ctx.events.emit('audit', {userId, action, resource, ip, requestId, req, meta})` (`extra` may carry `ip`, `requestId` and `req`;
+pass the request object as `req` so automatic capture knows this request is already recorded). Action names are sanitised to
 `[A-Za-z0-9_.:*-]{1,64}`, meta is depth/size-bounded and keys like `password|token|secret|code|hash|authorization|apikey` are redacted.
-Automatic capture (`onRequestEnd`, only when no explicit entry was written for the request): every successful `DELETE` and write to
+Automatic capture (`onRequestEnd`, only when no explicit entry was written for the same request: matched by the `req` object an emitter passes in the event, never by the client-chosen `x-request-id`, so a client cannot silence capture by reusing an id): every successful `DELETE` and write to
 auth/keys/account/orgs/share/invite/member/publish/permission/password-style paths (`http.<method>`), and `403`s (`access.denied`, once per minute per route+IP).
 Events recorded by this area: `auth.register|login|login.failed|logout|password.*|email.verified|2fa.*|key.create|key.revoke|session.revoke*`,
 `account.export|profile.update`, `org.*`. Failed sign-ins are logged to the *account owner's* log (1st, 5th, 6th, then every 10th).
@@ -168,8 +173,10 @@ Events recorded by this area: `auth.register|login|login.failed|logout|password.
 * CORS is closed unless `RD_CORS_ORIGINS` lists exact origins (`https://app.example,https://x.example`) or `*`. Preflight (`OPTIONS`) is answered with
   `204`, requested headers are reflected only if they look like header names, `Max-Age` 600, `Vary: Origin`, never `Allow-Credentials` (auth is a bearer header).
 * `x-request-id`: kept if `[A-Za-z0-9._:=+/-]{1,64}`, otherwise replaced by a UUID (also for logging).
-* `RD_ALLOWED_HOSTS` rejects other `Host` headers with `421` (DNS-rebinding defence). Bodies over 64 KB to `/api/{auth,account,keys,orgs,audit}` get `413` before being read.
-* Unknown `/api/*` paths are answered by the module (JSON 404 with the same headers).
+* `RD_ALLOWED_HOSTS` rejects other `Host` headers with `421` (DNS-rebinding defence). Bodies over 64 KB to `/api/{auth,account,keys,orgs,audit}` get `413` before being read, and chunked bodies (no declared length) get `411`.
+* Unknown `/api/*` paths are answered by the module (JSON 404 with the same headers). A malformed percent-encoding in any path (`/api/orgs/%E0%A4%A`) is a `400`, not the router's `500`.
+* Stored request ids (audit log) must look like ids (`[A-Za-z0-9._:=+/-]{1,64}`), otherwise they are stored as `null`.
+* Addresses are validated conservatively (ASCII, RFC 5322 atext local part, dotted domain with a 2+ letter TLD; IDN domains must be given as punycode): no quotes, commas, brackets or spaces, so an address can never name several recipients.
 
 **How the headers reach every response.** `security.js` registers `ctx.hooks.onRequest` (an *early* hook `fn(rc)`) and also runs in `beforeRoute`.
 Until `src/app.js` calls `hooks.onRequest` before routing, responses that never reach `beforeRoute` (401, 429, static files) lack these headers; to cover
@@ -178,10 +185,21 @@ the app calls the early hook. See "Integration" below.
 
 ## Mail
 
-`ctx.mailer.send({to, subject, text, tags?})` (promise). Default: discards mail with a one-time warning; with `RD_DEV_OUTBOX=1` messages go to a 200-entry ring buffer readable at
-`GET /api/dev/outbox?to=&limit=` (**loopback only**, 404 otherwise; `DELETE` clears it). No SMTP client is bundled: assign your own transport to `ctx.mailer` at start-up.
+`ctx.mailer.send({to, subject, text, tags?})` returns a promise. Transports, in order of precedence:
+
+1. **SMTP** (built in, `node:net`/`node:tls` only): set `RD_SMTP_URL=smtp://user:pass@host:587` (or `smtps://...:465` for implicit TLS; credentials percent-encoded) and
+   `RD_MAIL_FROM="RD Cloude <no-reply@example.com>"`. Certificates are always verified (`RD_SMTP_CA_FILE` adds a private CA); STARTTLS is used when offered and
+   mail or credentials never travel unencrypted to a non-loopback relay (`RD_SMTP_ALLOW_PLAINTEXT=1` overrides, for trusted networks only). AUTH PLAIN or LOGIN.
+   Bounded in-memory queue (500), 3 parallel connections, 3 retries (5 s, 30 s, 2 min) for 4xx/network errors, none for 5xx. Subjects and names are RFC 2047 encoded,
+   bodies are UTF-8 base64, CR/LF can never reach a header, and every recipient goes through the same strict address check as sign-up.
+   `send()` resolves once the relay accepted the message. A broken configuration is logged at start-up and mail fails (requests never do).
+2. **Your own**: assign any object with `send` to `ctx.mailer` at start-up (SES, SendGrid, ...).
+3. **None**: mail is discarded with a one-time warning. With `RD_DEV_OUTBOX=1` every message is also kept in a 200-entry ring buffer readable at
+   `GET /api/dev/outbox?to=&limit=` (**loopback only**, 404 otherwise; `DELETE` clears it), whatever the transport.
+
 Links in mails are absolute only when `RD_PUBLIC_URL` is set; the `Host` header is never used (reset-link poisoning). Mail failures never fail a request.
 The standalone page `/auth/account#mode=forgot|reset|verify|signin` (HTML + `/auth/account.js`, CSP-clean) handles the links in those mails and a two-step sign-in for 2FA accounts.
+Limitations: no DKIM/SPF tooling (configure them on your relay), no bounce handling, queue and retries are in memory (lost on restart), no OAuth2 SMTP auth.
 
 ## Configuration
 
@@ -194,6 +212,7 @@ The standalone page `/auth/account#mode=forgot|reset|verify|signin` (HTML + `/au
 | `RD_LOGIN_FREE_ATTEMPTS` / `RD_LOGIN_IP_FREE_ATTEMPTS` / `RD_2FA_FREE_ATTEMPTS` | 5 / 30 / 10 | failures before locking |
 | `RD_LOGIN_BASE_DELAY_MS` / `RD_LOGIN_MAX_DELAY_MS` | 1000 / 900000 | backoff |
 | `RD_REGISTER_PER_HOUR` / `RD_MAX_API_KEYS` / `RD_PASSWORD_MIN` | 100 / 50 / 8 | limits |
+| `RD_SMTP_URL`, `RD_MAIL_FROM`, `RD_SMTP_CA_FILE`, `RD_SMTP_ALLOW_PLAINTEXT` | unset | outgoing mail (see Mail) |
 | `RD_CORS_ORIGINS`, `RD_HSTS`, `RD_ALLOWED_HOSTS`, `RD_CSP_REPORT_ONLY`, `RD_PUBLIC_URL`, `RD_DEV_OUTBOX`, `RD_AUDIT_MAX_PER_USER` | unset | see above |
 
 ## Console UI
@@ -206,8 +225,25 @@ members, roles, invites, transfer, delete; `#team/invite/<token>` is the invitat
 ## Integration with the rest of the app
 
 Events added: `audit`, `account.export`, `account.deleting`, `account.deleted`, `org.created`, `org.deleted`, `org.member.added|removed|role_changed`.
-`ctx` gains `mailer`, `audit`, `access`, `scopes`, `csp`; `hooks` gains `onRequest`. Collections: `auth_tokens`, `org_orgs`, `org_members`, `org_invites`,
+`ctx` gains `mailer`, `audit`, `access`, `scopes`, `scopeRules`, `csp`, `cspExtras`; `hooks` gains `onRequest`. Collections: `auth_tokens`, `org_orgs`, `org_members`, `org_invites`,
 `audit_log`, `audit_state`; `users`, `sessions`, `apiKeys` gained fields (`emailVerified`, `totp`, `recoveryCodes`, `knownDevices`, `lastSeenAt`, `scopes`, `expiresAt`...).
+
+## Changes this area needs in files it does not own
+
+Everything works without them (tests pass on the current tree); with them the gaps listed under "limitations" close.
+
+1. `src/app.js` - **early hook** so that *every* response (401, 404, 429, static files) carries the security headers:
+   `hooks = { onRequest: [], beforeRoute: [], onRequestEnd: [] }` and, right after `rc` is built, `for (const fn of hooks.onRequest) { try { fn(rc) } catch (e) { console.error(...) } }`.
+   The module detects the call and stops serving HTML itself. Verified on a scratch copy: console + `browser-check` still pass.
+2. `src/app.js` - `new URL(req.url, ...)` runs outside the `try`: a request line like `GET // HTTP/1.1` rejects the handler (stack trace in the log, the client waits until it times out).
+   Wrap it and answer `400`. Also key the per-IP rate limiter on `clientIp(req)` from `src/auth.js` (honours `RD_TRUST_PROXY`) instead of `req.socket.remoteAddress`,
+   otherwise every visitor behind a reverse proxy shares one 300 req/min bucket.
+3. `src/http.js` - `Router.match` throws `URIError` for `%E0%A4%A` (500 + stack). `security.js` intercepts this in its `match` wrapper; fixing it at the source is cleaner.
+4. `public/lib.js` + `public/app.js` - the console sign-in form cannot do the second step of 2FA login: `api()` should attach `err.status` / `err.data` to the thrown `Error`, and the
+   form should, on `err.data?.twoFactorRequired`, ask for the code and `POST /api/auth/login/2fa {challenge, code}`. Until then the 401 message points users to `/auth/account#mode=signin`.
+5. `docs/ARCHITECTURE.md` - registry entries: events `audit`, `account.export`, `account.deleting`, `account.deleted`, `org.created|deleted`, `org.member.added|removed|role_changed`;
+   `ctx` fields `mailer`, `audit`, `access`, `scopes`, `scopeRules`, `csp`, `cspExtras`; `hooks.onRequest`; auth-owned collections `auth_tokens`, `org_*`, `audit_*`.
+6. Deployment: set `NODE_ENV=production` (blocks weak passwords), `RD_SECRET_KEY`, `RD_PUBLIC_URL`, `RD_TRUST_PROXY` (behind a proxy) and `RD_SMTP_URL` + `RD_MAIL_FROM`.
 
 ## Security notes and honest limitations
 
@@ -217,7 +253,7 @@ Events added: `audit`, `account.export`, `account.deleting`, `account.deleted`, 
 * Lockout state, 2FA challenges and rate gates are **in memory**: a restart clears them. Single process only.
 * Registration answers `409` for existing addresses (kept for compatibility), so the sign-up form can enumerate accounts; sign-ups are rate limited per IP.
 * An account-wide password lockout is deliberately absent (it would let an attacker lock the owner out); distributed guessing is limited per IP only. 2FA guesses *are* limited per account.
-* No SMTP transport, no QR code for 2FA enrolment (manual key + `otpauth://` link only), no WebAuthn, no SSO/SAML, no per-org audit log.
+* No QR code for 2FA enrolment (manual key + `otpauth://` link only), no WebAuthn, no SSO/SAML, no per-org audit log.
 * The audit key lives with the data: an attacker with full control of the data directory can forge a chain. Entries of a deleted account are deleted with it.
 * Organization sharing is not adopted by any service yet; keys cannot be scoped to an organization.
 * `X-Forwarded-For` is trusted only with `RD_TRUST_PROXY`; the app's own per-IP rate limiter uses the raw socket address (see Integration requests in the report).

@@ -196,15 +196,15 @@ function* readLines(file, maxLine) {
 // ---------------------------------------------------------------------------------------------
 // Configuration
 // ---------------------------------------------------------------------------------------------
-function intOpt(optVal, envName, def, min, max) {
-  const raw = optVal ?? process.env[envName]
+function intOpt(env, optVal, envName, def, min, max) {
+  const raw = optVal ?? env[envName]
   if (raw === undefined || raw === null || raw === '') return def
   const n = typeof raw === 'number' ? raw : /^\d+$/.test(String(raw).trim()) ? Number(raw) : NaN
   if (!Number.isInteger(n) || n < min || n > max) throw new RangeError(`${envName} must be an integer between ${min} and ${max} (got "${raw}")`)
   return n
 }
-function boolOpt(optVal, envName, def) {
-  const raw = optVal ?? process.env[envName]
+function boolOpt(env, optVal, envName, def) {
+  const raw = optVal ?? env[envName]
   if (raw === undefined || raw === null || raw === '') return def
   if (typeof raw === 'boolean') return raw
   const s = String(raw).toLowerCase()
@@ -212,21 +212,22 @@ function boolOpt(optVal, envName, def) {
   if (['0', 'false', 'no', 'off'].includes(s)) return false
   throw new RangeError(`${envName} must be a boolean (1/0, true/false), got "${raw}"`)
 }
-export function resolveConfig(opts = {}) {
-  const fsync = String(opts.fsync ?? process.env.RD_FSYNC ?? 'batch').toLowerCase()
+/** Validated engine settings: explicit options win over RD_* variables of `env` (default process.env). Throws RangeError. */
+export function resolveConfig(opts = {}, env = process.env) {
+  const fsync = String(opts.fsync ?? env.RD_FSYNC ?? 'batch').toLowerCase()
   if (!FSYNC_MODES.includes(fsync)) throw new RangeError(`RD_FSYNC must be one of ${FSYNC_MODES.join('|')} (got "${fsync}")`)
-  const recover = String(opts.recover ?? process.env.RD_RECOVER ?? '').toLowerCase()
+  const recover = String(opts.recover ?? env.RD_RECOVER ?? '').toLowerCase()
   if (recover && recover !== 'truncate') throw new RangeError(`RD_RECOVER must be empty or "truncate" (got "${recover}")`)
   return {
     fsync,
-    fsyncIntervalMs: intOpt(opts.fsyncIntervalMs, 'RD_FSYNC_INTERVAL_MS', 100, 1, 60_000),
-    compactMinBytes: intOpt(opts.compactMinBytes, 'RD_WAL_COMPACT_MIN_BYTES', 8 * 1024 * 1024, 1, 2 ** 40),
-    compactMaxBytes: intOpt(opts.compactMaxBytes, 'RD_WAL_COMPACT_MAX_BYTES', 256 * 1024 * 1024, 1, 2 ** 40),
-    keepGenerations: intOpt(opts.keepGenerations, 'RD_KEEP_GENERATIONS', 2, 1, 10),
-    lockLeaseMs: intOpt(opts.lockLeaseMs, 'RD_LOCK_LEASE_MS', 30_000, 100, 3_600_000),
-    blobMaxBytes: intOpt(opts.blobMaxBytes, 'RD_BLOB_MAX_BYTES', 256 * 1024 * 1024, 1, 2 ** 31),
-    snapshotOnClose: boolOpt(opts.snapshotOnClose, 'RD_SNAPSHOT_ON_CLOSE', true),
-    forceUnlock: boolOpt(opts.forceUnlock, 'RD_FORCE_UNLOCK', false),
+    fsyncIntervalMs: intOpt(env, opts.fsyncIntervalMs, 'RD_FSYNC_INTERVAL_MS', 100, 1, 60_000),
+    compactMinBytes: intOpt(env, opts.compactMinBytes, 'RD_WAL_COMPACT_MIN_BYTES', 8 * 1024 * 1024, 1, 2 ** 40),
+    compactMaxBytes: intOpt(env, opts.compactMaxBytes, 'RD_WAL_COMPACT_MAX_BYTES', 256 * 1024 * 1024, 1, 2 ** 40),
+    keepGenerations: intOpt(env, opts.keepGenerations, 'RD_KEEP_GENERATIONS', 2, 1, 10),
+    lockLeaseMs: intOpt(env, opts.lockLeaseMs, 'RD_LOCK_LEASE_MS', 30_000, 100, 3_600_000),
+    blobMaxBytes: intOpt(env, opts.blobMaxBytes, 'RD_BLOB_MAX_BYTES', 256 * 1024 * 1024, 1, 2 ** 31),
+    snapshotOnClose: boolOpt(env, opts.snapshotOnClose, 'RD_SNAPSHOT_ON_CLOSE', true),
+    forceUnlock: boolOpt(env, opts.forceUnlock, 'RD_FORCE_UNLOCK', false),
     recover,
   }
 }
@@ -1270,28 +1271,42 @@ export function createDb(dataDir, opts = {}) {
       return row
     },
     get: (col, rid) => store.get(col, rid),
+    // Scans visit at most the rows that existed when they started (like Array#filter, which ignores elements appended
+    // meanwhile), so a predicate that inserts into the collection it is scanning cannot make the scan run forever.
     find(col, pred = alwaysTrue) {
       const c = store.cols.get(col)
       const out = []
       if (!c) return out
+      const limit = c.size
       let i = 0
-      for (const r of c.values()) if (pred(r, i++)) out.push(r)
+      for (const r of c.values()) {
+        if (i >= limit) break
+        if (pred(r, i++)) out.push(r)
+      }
       return out
     },
     findOne(col, pred) {
       const c = store.cols.get(col)
       if (!c) return null
+      const limit = c.size
       let i = 0
-      for (const r of c.values()) if (pred(r, i++)) return r
+      for (const r of c.values()) {
+        if (i >= limit) break
+        if (pred(r, i++)) return r
+      }
       return null
     },
     count(col, pred) {
       const c = store.cols.get(col)
       if (!c) return 0
       if (!pred) return c.size
+      const limit = c.size
       let n = 0
       let i = 0
-      for (const r of c.values()) if (pred(r, i++)) n++
+      for (const r of c.values()) {
+        if (i >= limit) break
+        if (pred(r, i++)) n++
+      }
       return n
     },
     collections: () => [...store.cols.keys()],
@@ -1326,8 +1341,12 @@ export function createDb(dataDir, opts = {}) {
       const c = store.cols.get(col)
       if (!c) return 0
       const ids = []
+      const limit = c.size
       let i = 0
-      for (const r of c.values()) if (pred(r, i++)) ids.push(r.id)
+      for (const r of c.values()) {
+        if (i >= limit) break
+        if (pred(r, i++)) ids.push(r.id)
+      }
       if (!ids.length) return 0
       if (ids.length <= REMOVE_CHUNK) commit({ o: 'R', c: col, ids })
       else runTransaction(() => { for (let k = 0; k < ids.length; k += REMOVE_CHUNK) commit({ o: 'R', c: col, ids: ids.slice(k, k + REMOVE_CHUNK) }) })

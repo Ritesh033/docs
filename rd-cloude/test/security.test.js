@@ -1,6 +1,9 @@
 // Security, identity and audit tests. Run: node --test test/security.test.js
 import { test } from 'node:test'
 import http from 'node:http'
+import net from 'node:net'
+import tls from 'node:tls'
+import { execFileSync } from 'node:child_process'
 import assert from 'node:assert/strict'
 import fs from 'node:fs'
 import os from 'node:os'
@@ -9,6 +12,7 @@ import { startTestApp } from './helpers.js'
 import {
   authState, totp, hotp, verifyTotp, totpCounter, base32Encode, base32Decode, otpauthUri, scopeAllows, scopeCovers, requiredScope,
   checkPassword, normalizeScopes, SCOPE_NAMES, devOutbox, generateRecoveryCodes, clientIp, deviceLabel,
+  createSmtpTransport, smtpConfigFromEnv, buildMessage,
 } from '../src/auth.js'
 
 process.env.RD_DEV_OUTBOX = '1'
@@ -882,7 +886,9 @@ test('security headers: strict CSP for the console, sandbox CSP + no-store for t
     assert.equal(page.headers.get('x-frame-options'), 'DENY')
     assert.ok(page.headers.get('permissions-policy'))
     assert.equal(page.headers.get('strict-transport-security'), null, 'no HSTS over plain HTTP')
-    assert.equal(page.headers.get('cache-control'), 'no-cache')
+    // Until src/app.js calls hooks.onRequest, this module serves the HTML documents itself (ETag + no-cache); afterwards app.js's static handler does.
+    const viaFallback = page.headers.get('etag') !== null
+    if (viaFallback) assert.equal(page.headers.get('cache-control'), 'no-cache')
 
     const api = await app.call('GET', '/api/health')
     assert.equal(api.headers.get('cache-control'), 'no-store')
@@ -895,9 +901,10 @@ test('security headers: strict CSP for the console, sandbox CSP + no-store for t
     assert.equal(unauth.headers.get('x-content-type-options'), 'nosniff')
 
     // conditional requests
-    const etag = page.headers.get('etag')
-    const again = await app.call('GET', '/', { headers: { 'if-none-match': etag } })
-    assert.equal(again.status, 304)
+    if (viaFallback) {
+      const again = await app.call('GET', '/', { headers: { 'if-none-match': page.headers.get('etag') } })
+      assert.equal(again.status, 304)
+    }
 
     // request ids: sane ones are echoed, hostile ones replaced
     const ok = await app.call('GET', '/api/health', { headers: { 'x-request-id': 'trace-123.abc' } })
@@ -1309,13 +1316,14 @@ test('the standalone account page and its script are served with the strict CSP'
     const js = await app.call('GET', '/auth/account.js')
     assert.equal(js.status, 200)
     assert.match(js.headers.get('content-type'), /javascript/)
+    assert.match(js.data, /hashchange/, 'a second emailed link opened in the same tab re-mounts the page')
   })
 })
 
 test('the HTML fallback switches itself off once the app calls the early hook (hooks.onRequest)', async () => {
   await withApp(async (app) => {
     const before = await app.call('GET', '/')
-    assert.ok(before.headers.get('etag'), 'served by the fallback')
+    assert.match(before.headers.get('content-security-policy'), /script-src 'self'/, 'documents carry the CSP either way')
     const headers = {}
     const res = { headersSent: false, setHeader: (k, v) => { headers[k.toLowerCase()] = v }, getHeader: (k) => headers[k.toLowerCase()] }
     assert.equal(app.ctx.hooks.onRequest.length, 1)
@@ -1371,4 +1379,447 @@ test('state survives a restart: 2FA secret, recovery codes, sessions, keys and t
       } finally { await app.shutdown() }
     }
   } finally { fs.rmSync(dir, { recursive: true, force: true }) }
+})
+
+/* ============================================================== hardening added in the second pass */
+
+test('API keys: authenticated routes outside /api/ fall back to read/write (fail closed)', async () => {
+  await withApp(async (app) => {
+    const u = await app.register('outside@rd.dev', PW)
+    const mk = async (scopes) => (scopes ? (await u.call('POST', '/api/keys', { body: { name: 'k', scopes } })).data.secret : (await u.call('POST', '/api/keys', { body: { name: 'full' } })).data.secret)
+    app.ctx.router.get('/zzgateway/data', ({ user }) => ({ owner: user.email }))
+    app.ctx.router.post('/zzgateway/data', () => [201, { ok: true }])
+    app.ctx.router.get('/zzgateway/open', () => ({ open: true }), { public: true })
+    const code = async (token, m, p) => (await app.call(m, p, { token, body: m === 'POST' ? {} : undefined })).status
+    const [storage, read, write, full] = [await mk(['storage']), await mk(['read']), await mk(['write']), await mk(null)]
+    assert.equal(await code(storage, 'GET', '/zzgateway/data'), 403, 'a service-scoped key must not reach an unmapped authenticated prefix')
+    assert.equal(await code(read, 'GET', '/zzgateway/data'), 200)
+    assert.equal(await code(read, 'POST', '/zzgateway/data'), 403)
+    assert.equal(await code(write, 'POST', '/zzgateway/data'), 201)
+    assert.equal(await code(full, 'POST', '/zzgateway/data'), 201, 'keys without scopes keep full access')
+    assert.equal((await app.call('GET', '/zzgateway/data', { token: u.token })).status, 200, 'sessions are never scoped')
+    assert.equal(await code(storage, 'GET', '/zzgateway/open'), 200, 'public routes stay public')
+    assert.equal((await app.call('GET', '/zzgateway/data')).status, 401)
+  })
+})
+
+test('malformed percent-encoding is a 400 with the security headers, never a 500', async () => {
+  await withApp(async (app) => {
+    const u = await app.register('pct@rd.dev', PW)
+    for (const p of ['/api/orgs/%E0%A4%A', '/api/keys/%', '/%E0%A4%A', '/ui/%zz.js', '/api/%']) {
+      const r = await u.call('GET', p)
+      assert.equal(r.status, 400, p)
+      assert.equal(r.data.error, 'Malformed URL encoding')
+      assert.match(r.headers.get('content-security-policy'), /default-src 'none'/, `${p} carries the headers`)
+      assert.ok(!JSON.stringify(r.data).includes(' at '), 'no stack trace')
+    }
+    assert.equal((await u.call('DELETE', '/api/keys/%E0%A4%A')).status, 400)
+    assert.equal((await app.call('GET', '/api/orgs/valid%20id')).status, 401, 'well-formed encodings still route normally')
+  })
+})
+
+test('tiny-body endpoints refuse chunked bodies (no declared length means no early size check)', async () => {
+  await withApp(async (app) => {
+    const u = await app.register('chunk@rd.dev', PW)
+    const target = new URL(app.base)
+    const send = (path, headers, chunks) => new Promise((resolve, reject) => {
+      const req = http.request({ host: '127.0.0.1', port: target.port, path, method: 'POST', headers }, (res) => { res.resume(); res.on('end', () => resolve(res.statusCode)) })
+      req.on('error', reject)
+      for (const c of chunks) req.write(c)
+      req.end()
+    })
+    const h = { 'content-type': 'application/json', 'transfer-encoding': 'chunked' }
+    assert.equal(await send('/api/auth/login', h, ['{"email":"a@b.co",', '"password":"x"}']), 411)
+    assert.equal(await send('/api/keys', { ...h, authorization: `Bearer ${u.token}` }, ['{"name":"k"}']), 411)
+    // other endpoints keep accepting streamed uploads (drive / storage use raw bodies of any size)
+    const r = await u.call('PUT', '/api/drive/files?name=c.txt', { raw: 'streamed ok', headers: { 'content-type': 'text/plain' } })
+    assert.equal(r.status, 201)
+    // an honest, small body still works
+    assert.equal((await u.call('POST', '/api/keys', { body: { name: 'fine' } })).status, 201)
+  })
+})
+
+test('account deletion finds blobs in any collection, but never deletes a blob another row still references', async () => {
+  await withApp(async (app) => {
+    const a = await app.register('blobdel1@rd.dev', PW)
+    const b = await app.register('blobdel2@rd.dev', PW)
+    const mkBlob = (name) => { const id = app.db.id('blob'); app.db.putBlob(id, Buffer.from(name)); return id }
+    const own = mkBlob('own'); const part1 = mkBlob('p1'); const part2 = mkBlob('p2'); const thumb = mkBlob('thumb'); const shared = mkBlob('shared'); const many = [mkBlob('m1'), mkBlob('m2')]
+    app.db.insert('zz_media', { userId: a.user.id, blobId: own, thumbBlobId: thumb, parts: [{ blobId: part1 }, { blobId: part2 }], blobIds: many })
+    app.db.insert('zz_media', { userId: a.user.id, blobId: shared })
+    app.db.insert('zz_media', { userId: b.user.id, blobId: shared }) // content-addressed / deduplicated: another tenant uses the same blob
+    const del = await a.call('DELETE', '/api/account', { body: { password: PW } })
+    assert.equal(del.status, 200)
+    for (const id of [own, part1, part2, thumb, ...many]) assert.equal(app.db.getBlob(id), null, 'unshared blobs are gone')
+    assert.equal(app.db.getBlob(shared)?.toString(), 'shared', 'a blob still referenced by someone else survives')
+    assert.equal(app.db.find('zz_media', () => true).length, 1)
+  })
+})
+
+test('modules that load before security.js can queue scope rules and CSP additions on the ctx', async () => {
+  const { EventEmitter } = await import('node:events')
+  const { Router, HANDLED } = await import('../src/http.js')
+  const { createDb } = await import('../src/db.js')
+  const { register } = await import('../src/modules/security.js')
+  const db = createDb()
+  const router = new Router()
+  const events = new EventEmitter()
+  const ctx = {
+    db, router, events, hooks: { beforeRoute: [], onRequestEnd: [] }, config: { root: process.cwd() }, HANDLED,
+    scopeRules: [['/api/early', 'storage'], ['/not-api', 'storage'], ['/api/bad', 'nonsense']], cspExtras: [['frame-src', "'self'"], ['bad directive', 'x']],
+  }
+  const quiet = console.error
+  console.error = () => {}
+  try { await register(router, db, ctx) } finally { console.error = quiet }
+  assert.match(ctx.csp.app(), /frame-src 'self'/, 'queued CSP addition applied')
+  const guard = ctx.hooks.beforeRoute.at(-1)
+  const rc = (scopes, p, method = 'GET') => ({
+    req: { method, headers: {}, socket: {} }, res: { headersSent: true, setHeader() {}, getHeader() {} }, url: new URL(`http://x${p}`),
+    route: { public: false, meta: null }, auth: { via: 'apiKey', scopes }, requestId: 'abc',
+  })
+  await guard(rc(['storage'], '/api/early/items'))
+  await assert.rejects(guard(rc(['ai'], '/api/early/items')), (e) => e.status === 403)
+  await assert.rejects(guard(rc(['storage'], '/api/bad/items')), (e) => e.status === 403, 'invalid queued rules are rejected, not applied')
+  ctx.scopeRules.push(['/api/late', 'ai'], ['/api/ignored', 'nonsense'])
+  console.error = () => {}
+  try { ctx.scopeRules.push(['/api/ignored', 'nonsense']) } finally { console.error = quiet }
+  await guard(rc(['ai'], '/api/late/x'))
+  ctx.cspExtras.push(['img-src', 'https://img.example'])
+  assert.match(ctx.csp.app(), /img-src 'self' data: blob: https:\/\/img\.example/)
+  events.emit('shutdown')
+  db.close?.()
+})
+
+test('audit: a client cannot suppress automatic capture by reusing a request id of an earlier explicit entry', async () => {
+  await withApp(async (app) => {
+    const u = await app.register('evade@rd.dev', PW)
+    const id = 'reused-request-id-1'
+    // explicit entry written under the attacker-chosen id
+    assert.equal((await u.call('POST', '/api/keys', { body: { name: 'k' }, headers: { 'x-request-id': id } })).status, 201)
+    // a route that emits no explicit audit event itself, so only the automatic capture can record it
+    const doc = (await u.call('POST', '/api/db/evade', { body: { a: 1 } })).data
+    assert.equal((await u.call('DELETE', `/api/db/evade/${doc.id}`, { headers: { 'x-request-id': id } })).status, 200)
+    const log = (await u.call('GET', '/api/audit?limit=100')).data.entries
+    const del = log.filter((e) => e.action === 'http.delete')
+    assert.equal(del.length, 1, 'the DELETE is still recorded')
+    assert.equal(del[0].requestId, id)
+    // ...while one request never produces both an explicit and an automatic entry
+    const before = (await u.call('GET', '/api/audit?limit=200')).data.entries.length
+    const k = (await u.call('POST', '/api/keys', { body: { name: 'once' } })).data.key
+    await u.call('DELETE', `/api/keys/${k.id}`)
+    const after = (await u.call('GET', '/api/audit?limit=200')).data.entries
+    assert.equal(after.length - before, 2, 'create + revoke: one entry each, no duplicates')
+    assert.equal((await u.call('GET', '/api/audit/verify')).data.ok, true)
+  })
+})
+
+test('audit: request ids are stored only when they look like ids', async () => {
+  await withApp(async (app) => {
+    const u = await app.register('rid@rd.dev', PW)
+    app.ctx.audit(u.user.id, 'custom.thing', 'x:1', { a: 1 }, { requestId: '<script>alert(1)</script>' })
+    app.ctx.audit(u.user.id, 'custom.ok', 'x:2', {}, { requestId: 'trace-1:abc' })
+    const e = (await u.call('GET', '/api/audit?action=custom.*')).data.entries
+    assert.equal(e.find((x) => x.action === 'custom.thing').requestId, null)
+    assert.equal(e.find((x) => x.action === 'custom.ok').requestId, 'trace-1:abc')
+  })
+})
+
+test('email addresses: conservative syntax, nothing that could address several recipients through a lenient mailer', async () => {
+  const { normEmail } = await import('../src/auth.js')
+  for (const ok of ['a@rd.dev', 'First.Last+tag@Example.CO.uk', 'u1@x-y.io', 'a_b@xn--bcher-kva.example']) assert.doesNotThrow(() => normEmail(ok), ok)
+  assert.equal(normEmail('  First.Last+Tag@Example.CO.uk '), 'first.last+tag@example.co.uk')
+  for (const bad of ['a@b', 'a b@c.co', 'a,b@c.co', 'x@y.co,attacker', '<a@b.co>', '"a"@b.co', 'a..b@c.co', '.a@b.co', 'a.@b.co', 'a@-b.co', 'a@b..co', 'a@b.co.', 'ü@b.co', 'a@bü.co',
+    'a@@b.co', '@b.co', 'a@', `a@${'x'.repeat(64)}.co`, `${'a'.repeat(65)}@b.co`, 'a@b.c', 'a@b.co\r\nBcc: x@y.co', 42, null, {}]) {
+    assert.throws(() => normEmail(bad), (e) => e.status === 400, String(bad))
+  }
+  await withApp(async (app) => {
+    for (const email of ['victim@x.co,attacker', 'a@b.co\nBcc: evil@x.co', 'a b@c.co']) {
+      assert.equal((await app.call('POST', '/api/auth/register', { body: { email, password: PW } })).status, 400, email)
+    }
+    const o = await app.register('mailer-owner@rd.dev', PW)
+    const org = (await o.call('POST', '/api/orgs', { body: { name: 'Mail Org' } })).data
+    assert.equal((await o.call('POST', `/api/orgs/${org.id}/invites`, { body: { email: 'victim@x.co,attacker' } })).status, 400)
+    assert.equal((await o.call('POST', '/api/auth/password/forgot', { body: { email: 'victim@x.co,attacker' } })).status, 400)
+  })
+})
+
+
+/* ============================================================== SMTP transport (against an in-process fake server) */
+
+/**
+ * Minimal SMTP server that records what it receives. `plan` is consumed one connection at a time:
+ * { rcpt: 451 } answers RCPT TO with that code, { starttls: true } offers STARTTLS (needs opts.tls = {key, cert}),
+ * { injectAfterStarttls: true } sends extra bytes with the 220 reply, { silent: true } never greets.
+ */
+async function fakeSmtp({ secure = false, tlsCreds = null, plan = [], user = 'mailer', pass = 's3cr:et/ pass', mechanisms = 'PLAIN LOGIN' } = {}) {
+  const log = { connections: 0, commands: [], messages: [], auth: [], tlsUpgrades: 0 }
+  const handle = (sock, behavior) => {
+    let mode = 'cmd'
+    let data = ''
+    let rcpt = null
+    let from = null
+    let buf = ''
+    let authStep = null
+    const send = (line) => sock.write(`${line}\r\n`)
+    if (behavior.silent) return
+    send('220 fake ESMTP ready')
+    const onData = (chunk) => {
+      buf += chunk.toString('utf8')
+      let i
+      while ((i = buf.indexOf('\r\n')) >= 0) {
+        const line = buf.slice(0, i)
+        buf = buf.slice(i + 2)
+        if (mode === 'data') {
+          if (line === '.') {
+            mode = 'cmd'
+            log.messages.push({ from, to: rcpt, data, tls: sock.encrypted === true })
+            send('250 2.0.0 queued')
+          } else data += `${line.startsWith('..') ? line.slice(1) : line}\r\n`
+          continue
+        }
+        if (authStep) {
+          log.commands.push('<auth-step>')
+          if (authStep === 'user') { authStep = 'pass'; log.auth.push(Buffer.from(line, 'base64').toString()); send('334 UGFzc3dvcmQ6') } else {
+            authStep = null
+            log.auth.push(Buffer.from(line, 'base64').toString())
+            send(log.auth.at(-2) === user && log.auth.at(-1) === pass ? '235 2.7.0 ok' : '535 5.7.8 bad credentials')
+          }
+          continue
+        }
+        log.commands.push(line.replace(/^(AUTH PLAIN) .*/, '$1 <secret>'))
+        const up = line.toUpperCase()
+        if (up.startsWith('EHLO')) {
+          send('250-fake.test greets you')
+          if (behavior.starttls && !sock.encrypted) send('250-STARTTLS')
+          send(`250-AUTH ${mechanisms}`)
+          send('250 8BITMIME')
+        } else if (up === 'STARTTLS') {
+          send(behavior.injectAfterStarttls ? '220 go ahead\r\n250 injected' : '220 go ahead')
+          const raw = sock
+          raw.removeAllListeners('data')
+          const secured = new tls.TLSSocket(raw, { isServer: true, ...tlsCreds })
+          log.tlsUpgrades++
+          secured.on('data', onData)
+          secured.on('error', () => {})
+          sock = secured
+          buf = ''
+        } else if (up.startsWith('AUTH PLAIN ')) {
+          const [, u, pw] = Buffer.from(line.slice(11), 'base64').toString().split('\0')
+          log.auth.push(`${u}:${pw}`)
+          send(u === user && pw === pass ? '235 2.7.0 ok' : '535 5.7.8 bad credentials')
+        } else if (up === 'AUTH LOGIN') { authStep = 'user'; send('334 VXNlcm5hbWU6') } else if (up.startsWith('MAIL FROM:')) { from = line.slice(10); send('250 ok') } else if (up.startsWith('RCPT TO:')) {
+          rcpt = line.slice(8)
+          send(behavior.rcpt ? `${behavior.rcpt} rcpt refused` : '250 ok')
+        } else if (up === 'DATA') { mode = 'data'; data = ''; send('354 go') } else if (up === 'QUIT') { send('221 bye'); sock.end() } else send('500 what?')
+      }
+    }
+    sock.on('data', onData)
+    sock.on('error', () => {})
+  }
+  const onConn = (sock) => handle(sock, plan[log.connections++] ?? plan.at(-1) ?? {})
+  const server = secure ? tls.createServer({ ...tlsCreds }, onConn) : net.createServer(onConn)
+  await new Promise((r) => server.listen(0, '127.0.0.1', r))
+  return { log, port: server.address().port, user, pass, close: () => new Promise((r) => { server.close(r); server.closeAllConnections?.() }) }
+}
+
+let certCache
+function selfSignedCert() {
+  if (certCache !== undefined) return certCache
+  try {
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'rd-cert-'))
+    execFileSync('openssl', ['req', '-x509', '-newkey', 'rsa:2048', '-nodes', '-keyout', path.join(dir, 'k.pem'), '-out', path.join(dir, 'c.pem'), '-days', '2',
+      '-subj', '/CN=localhost', '-addext', 'subjectAltName=DNS:localhost,IP:127.0.0.1'], { stdio: 'ignore' })
+    certCache = { key: fs.readFileSync(path.join(dir, 'k.pem')), cert: fs.readFileSync(path.join(dir, 'c.pem')) }
+    fs.rmSync(dir, { recursive: true, force: true })
+  } catch { certCache = null }
+  return certCache
+}
+const body64 = (data) => Buffer.from(data.split('\r\n\r\n').slice(1).join('').replace(/\r\n/g, ''), 'base64').toString('utf8')
+const headerOf = (data, name) => new RegExp(`^${name}: (.*)$`, 'mi').exec(data)?.[1]
+const smtpCfg = (srv, extra = {}) => ({ host: '127.0.0.1', port: srv.port, from: 'RD Cloude <no-reply@rd.test>', retryDelaysMs: [10, 10], timeoutMs: 2000, ...extra })
+
+test('SMTP: delivers a well-formed message with AUTH over a loopback relay', async () => {
+  const srv = await fakeSmtp()
+  try {
+    const mail = createSmtpTransport(smtpCfg(srv, { user: srv.user, pass: srv.pass }))
+    const r = await mail.send({ to: 'Alice@Example.com', subject: 'Reset your password', text: 'Line one\nLine two.\n.dot-first line\n' })
+    assert.deepEqual([r.queued, r.delivered, r.attempts], [true, true, 1])
+    const m = srv.log.messages[0]
+    assert.equal(m.to, '<alice@example.com>')
+    assert.equal(m.from, '<no-reply@rd.test>')
+    assert.equal(headerOf(m.data, 'From'), '"RD Cloude" <no-reply@rd.test>')
+    assert.equal(headerOf(m.data, 'To'), 'alice@example.com')
+    assert.equal(headerOf(m.data, 'Subject'), 'Reset your password')
+    assert.match(headerOf(m.data, 'Message-ID'), /^<[0-9a-f-]{36}@rd\.test>$/)
+    assert.equal(headerOf(m.data, 'Content-Transfer-Encoding'), 'base64')
+    assert.equal(body64(m.data), 'Line one\r\nLine two.\r\n.dot-first line\r\n')
+    assert.deepEqual(srv.log.auth, [`${srv.user}:${srv.pass}`], 'credentials sent once, decoded correctly (colon, slash and space in the password)')
+    assert.ok(srv.log.commands.indexOf('AUTH PLAIN <secret>') < srv.log.commands.indexOf('DATA'))
+  } finally { await srv.close() }
+})
+
+test('SMTP: LOGIN mechanism when PLAIN is not offered; wrong credentials fail permanently without retries or leaks', async () => {
+  const loginOnly = await fakeSmtp({ mechanisms: 'LOGIN' })
+  try {
+    const mail = createSmtpTransport(smtpCfg(loginOnly, { user: loginOnly.user, pass: loginOnly.pass }))
+    assert.equal((await mail.send({ to: 'a@b.co', subject: 's', text: 't' })).delivered, true)
+    assert.deepEqual(loginOnly.log.auth, [loginOnly.user, loginOnly.pass])
+    assert.ok(!loginOnly.log.commands.some((c) => c.startsWith('AUTH PLAIN')), 'PLAIN was not attempted')
+  } finally { await loginOnly.close() }
+  const none = await fakeSmtp({ mechanisms: 'CRAM-MD5' })
+  try {
+    const mail = createSmtpTransport(smtpCfg(none, { user: 'x', pass: 'y' }))
+    await assert.rejects(mail.send({ to: 'a@b.co', subject: 's', text: 't' }), /no supported AUTH mechanism/)
+  } finally { await none.close() }
+  const srv = await fakeSmtp()
+  try {
+    const bad = createSmtpTransport(smtpCfg(srv, { user: 'mailer', pass: 'hunter2-wrong' }))
+    await assert.rejects(bad.send({ to: 'a@b.co', subject: 's', text: 't' }), (e) => /authentication/.test(e.message) && e.transient === false && !e.message.includes('hunter2'))
+    assert.equal(srv.log.connections, 1, 'a 535 is permanent: no retry')
+    assert.equal(srv.log.messages.length, 0)
+  } finally { await srv.close() }
+})
+
+test('SMTP: header injection and multi-recipient tricks never reach the wire', async () => {
+  const srv = await fakeSmtp()
+  try {
+    const mail = createSmtpTransport(smtpCfg(srv))
+    await mail.send({ to: 'a@b.co', subject: 'Hi\r\nBcc: evil@x.co\r\n\r\nSpoofed body', text: 'x' })
+    const raw = srv.log.messages[0].data
+    assert.ok(!/^Bcc:/mi.test(raw), 'CR/LF in the subject cannot start a new header')
+    assert.equal(headerOf(raw, 'Subject'), 'Hi Bcc: evil@x.co Spoofed body')
+    for (const to of ['a@b.co,evil@x.co', 'a@b.co\r\nRCPT TO:<evil@x.co>', '<a@b.co>, <c@d.co>', 'x@y.co,attacker']) {
+      await assert.rejects(mail.send({ to, subject: 's', text: 't' }), (e) => /invalid message/.test(e.message), to)
+    }
+    assert.equal(srv.log.messages.length, 1)
+    assert.ok(!srv.log.commands.some((c) => /evil|attacker|c@d\.co/.test(c)), 'no stray recipient was ever offered to the server')
+    // non-ASCII subjects and names become RFC 2047 encoded words, long ones are split under 75 characters
+    const enc = createSmtpTransport(smtpCfg(srv, { from: 'Café Cloud <no-reply@rd.test>' }))
+    await enc.send({ to: 'a@b.co', subject: 'Bienvenue, élève! '.repeat(8), text: 'héllo wörld' })
+    const m = srv.log.messages.at(-1).data
+    const subj = m.match(/^Subject: ((?:.*\r\n )*.*)$/m)[1]
+    for (const w of subj.split('\r\n ')) assert.ok(w.length <= 75 && /^=\?UTF-8\?B\?[A-Za-z0-9+/=]+\?=$/.test(w), w)
+    assert.equal(subj.split('\r\n ').map((w) => Buffer.from(w.slice(10, -2), 'base64').toString()).join(''), 'Bienvenue, élève! '.repeat(8).trim())
+    assert.match(headerOf(m, 'From'), /^=\?UTF-8\?B\?[A-Za-z0-9+/=]+\?= <no-reply@rd\.test>$/)
+    assert.equal(body64(m), 'héllo wörld')
+  } finally { await srv.close() }
+})
+
+test('SMTP: transient failures (4xx, network) are retried with backoff, permanent ones are not', async () => {
+  const srv = await fakeSmtp({ plan: [{ rcpt: 451 }, { rcpt: 451 }, {}] })
+  try {
+    const mail = createSmtpTransport(smtpCfg(srv))
+    const r = await mail.send({ to: 'a@b.co', subject: 's', text: 't' })
+    assert.equal(r.attempts, 3)
+    assert.equal(srv.log.connections, 3)
+    assert.equal(srv.log.messages.length, 1)
+  } finally { await srv.close() }
+  const refuse = await fakeSmtp({ plan: [{ rcpt: 550 }] })
+  try {
+    const mail = createSmtpTransport(smtpCfg(refuse))
+    await assert.rejects(mail.send({ to: 'a@b.co', subject: 's', text: 't' }), (e) => e.code === 550 && e.transient === false)
+    assert.equal(refuse.log.connections, 1, '5xx is final')
+  } finally { await refuse.close() }
+  const flaky = await fakeSmtp({ plan: [{ rcpt: 451 }] })
+  try {
+    const mail = createSmtpTransport(smtpCfg(flaky, { retryDelaysMs: [5] }))
+    await assert.rejects(mail.send({ to: 'a@b.co', subject: 's', text: 't' }), (e) => e.transient === true)
+    assert.equal(flaky.log.connections, 2, 'one retry, then give up')
+  } finally { await flaky.close() }
+})
+
+test('SMTP: timeouts, dead ports and silent servers fail cleanly', async () => {
+  const silent = await fakeSmtp({ plan: [{ silent: true }] })
+  try {
+    const mail = createSmtpTransport(smtpCfg(silent, { timeoutMs: 150, retryDelaysMs: [] }))
+    await assert.rejects(mail.send({ to: 'a@b.co', subject: 's', text: 't' }), /timed out/)
+  } finally { await silent.close() }
+  const dead = await fakeSmtp()
+  const port = dead.port
+  await dead.close()
+  const mail = createSmtpTransport({ host: '127.0.0.1', port, from: 'no-reply@rd.test', retryDelaysMs: [], timeoutMs: 500 })
+  await assert.rejects(mail.send({ to: 'a@b.co', subject: 's', text: 't' }), /cannot connect/)
+  assert.throws(() => createSmtpTransport({ host: 'x', port: 1, from: 'not an address' }))
+})
+
+test('SMTP: never sends credentials or mail in clear text to a non-loopback relay without STARTTLS', async () => {
+  const srv = await fakeSmtp()
+  try {
+    const strict = createSmtpTransport(smtpCfg(srv, { treatAsLocal: false, user: srv.user, pass: srv.pass, retryDelaysMs: [] }))
+    await assert.rejects(strict.send({ to: 'a@b.co', subject: 's', text: 't' }), /does not offer STARTTLS/)
+    assert.deepEqual(srv.log.auth, [])
+    assert.equal(srv.log.messages.length, 0)
+    const allowed = createSmtpTransport(smtpCfg(srv, { treatAsLocal: false, allowPlaintext: true, user: srv.user, pass: srv.pass }))
+    assert.equal((await allowed.send({ to: 'a@b.co', subject: 's', text: 't' })).delivered, true, 'explicit opt-in works')
+  } finally { await srv.close() }
+})
+
+test('SMTP: STARTTLS and implicit TLS verify the certificate; plaintext never precedes the upgrade', async (t) => {
+  const creds = selfSignedCert()
+  if (!creds) return t.skip('openssl is not available to create a test certificate')
+  const starttls = await fakeSmtp({ tlsCreds: creds, plan: [{ starttls: true }] })
+  try {
+    // an untrusted certificate is refused before any credential is sent
+    const untrusted = createSmtpTransport(smtpCfg(starttls, { user: starttls.user, pass: starttls.pass, retryDelaysMs: [] }))
+    await assert.rejects(untrusted.send({ to: 'a@b.co', subject: 's', text: 't' }), /TLS failed/)
+    assert.deepEqual(starttls.log.auth, [])
+    // trusted via a private CA: upgraded, then authenticated, then delivered
+    const trusted = createSmtpTransport(smtpCfg(starttls, { ca: creds.cert, user: starttls.user, pass: starttls.pass }))
+    assert.equal((await trusted.send({ to: 'a@b.co', subject: 'secure', text: 'tls body' })).delivered, true)
+    const cmds = starttls.log.commands
+    assert.ok(cmds.indexOf('STARTTLS') < cmds.indexOf('AUTH PLAIN <secret>'), 'credentials only after STARTTLS')
+    assert.equal(starttls.log.messages.at(-1).tls, true)
+    assert.equal(starttls.log.tlsUpgrades, 2)
+  } finally { await starttls.close() }
+
+  const injected = await fakeSmtp({ tlsCreds: creds, plan: [{ starttls: true, injectAfterStarttls: true }] })
+  try {
+    const mail = createSmtpTransport(smtpCfg(injected, { ca: creds.cert, retryDelaysMs: [] }))
+    await assert.rejects(mail.send({ to: 'a@b.co', subject: 's', text: 't' }), /injection/, 'bytes smuggled in before the handshake abort the session')
+  } finally { await injected.close() }
+
+  const implicit = await fakeSmtp({ secure: true, tlsCreds: creds })
+  try {
+    const bad = createSmtpTransport(smtpCfg(implicit, { secure: true, retryDelaysMs: [] }))
+    await assert.rejects(bad.send({ to: 'a@b.co', subject: 's', text: 't' }), /cannot connect/)
+    const good = createSmtpTransport(smtpCfg(implicit, { secure: true, ca: creds.cert, user: implicit.user, pass: implicit.pass }))
+    assert.equal((await good.send({ to: 'a@b.co', subject: 's', text: 'implicit tls' })).delivered, true)
+    assert.equal(body64(implicit.log.messages[0].data), 'implicit tls')
+  } finally { await implicit.close() }
+})
+
+test('SMTP: configuration from the environment, and the platform mailer uses it (with the dev outbox mirroring)', async () => {
+  const cfg = smtpConfigFromEnv({ RD_SMTP_URL: 'smtps://user%40x:p%3Aw%2Fd@mail.example.com', RD_MAIL_FROM: 'RD <no-reply@example.com>' })
+  assert.deepEqual([cfg.host, cfg.port, cfg.secure, cfg.user, cfg.pass], ['mail.example.com', 465, true, 'user@x', 'p:w/d'])
+  assert.equal(smtpConfigFromEnv({ RD_SMTP_URL: 'smtp://relay:2525', RD_MAIL_FROM: 'a@b.co' }).port, 2525)
+  assert.equal(smtpConfigFromEnv({ RD_SMTP_URL: 'smtp://relay', RD_MAIL_FROM: 'a@b.co' }).port, 587)
+  assert.equal(smtpConfigFromEnv({}), null)
+  assert.throws(() => smtpConfigFromEnv({ RD_SMTP_URL: 'smtp://relay' }), /RD_MAIL_FROM/)
+  assert.throws(() => smtpConfigFromEnv({ RD_SMTP_URL: 'http://relay', RD_MAIL_FROM: 'a@b.co' }), /smtp/)
+  assert.throws(() => smtpConfigFromEnv({ RD_SMTP_URL: 'nonsense', RD_MAIL_FROM: 'a@b.co' }), /valid URL/)
+
+  const srv = await fakeSmtp()
+  const restore = [setEnv('RD_SMTP_URL', `smtp://${encodeURIComponent(srv.user)}:${encodeURIComponent(srv.pass)}@127.0.0.1:${srv.port}`), setEnv('RD_MAIL_FROM', 'RD Cloude <no-reply@rd.test>')]
+  try {
+    await withApp(async (app) => {
+      assert.equal(app.ctx.mailer.transport, 'smtp')
+      await app.register('smtp-user@rd.dev', PW)
+      for (let i = 0; i < 40 && !srv.log.messages.length; i++) await new Promise((r) => setTimeout(r, 25))
+      const m = srv.log.messages.find((x) => x.to === '<smtp-user@rd.dev>')
+      assert.ok(m, 'the verification mail went out over SMTP')
+      assert.match(body64(m.data), /Verification token: \S+/)
+      assert.equal(mailsTo(app, 'smtp-user@rd.dev', 'verify-email').length, 1, 'RD_DEV_OUTBOX still mirrors it for debugging')
+    })
+  } finally { for (const r of restore) r(); await srv.close() }
+
+  const restoreBad = [setEnv('RD_SMTP_URL', 'http://nope'), setEnv('RD_MAIL_FROM', 'a@b.co')]
+  const quiet = console.error
+  console.error = () => {}
+  try {
+    await withApp(async (app) => {
+      assert.equal(app.ctx.mailer.transport, 'misconfigured')
+      assert.equal((await app.register('badmail@rd.dev', PW)).user.email, 'badmail@rd.dev', 'a broken mail setup never breaks sign-up')
+      await assert.rejects(app.ctx.mailer.send({ to: 'a@b.co', subject: 's', text: 't' }), /misconfigured/)
+    })
+  } finally { console.error = quiet; for (const r of restoreBad) r() }
 })

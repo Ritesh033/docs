@@ -51,7 +51,9 @@ export const LIMITS = Object.freeze({
   toolResultChars: 20_000,
   toolCallsPerRound: 8,
   searchResults: 200,
-  indexedMessagesPerUser: 50_000,
+  indexedCharsPerMessage: 20_000, // the first part of a long message is what gets indexed
+  indexedTermsPerMessage: 1_000,
+  indexPostingsPerUser: 2_000_000, // (term, message) pairs: roughly 100-200 bytes each
 })
 
 const IMAGE_TYPES = new Set(['image/png', 'image/jpeg', 'image/gif', 'image/webp'])
@@ -374,17 +376,20 @@ export function parseFences(text) {
   return out
 }
 
-function guessTitle(f, n) {
+const LANG_NAMES = { js: 'JavaScript', javascript: 'JavaScript', ts: 'TypeScript', typescript: 'TypeScript', py: 'Python', python: 'Python', sh: 'Shell', bash: 'Shell', shell: 'Shell', cpp: 'C++', csharp: 'C#', cs: 'C#', rb: 'Ruby', ruby: 'Ruby', go: 'Go', rust: 'Rust', rs: 'Rust', sql: 'SQL', json: 'JSON', css: 'CSS', yaml: 'YAML', yml: 'YAML', java: 'Java', php: 'PHP', xml: 'XML', c: 'C', kotlin: 'Kotlin', swift: 'Swift' }
+/** { title, generic }: generic titles ("Python snippet") are made up, so unrelated blocks must never be merged into one artifact by them. */
+function guessTitle(f) {
   const c = f.content
-  if (f.attrs.title) return f.attrs.title.replace(NAME_CTRL, ' ').trim().slice(0, 100) || `Artifact ${n}`
-  if (f.language === 'html') { const m = /<title[^>]*>([^<]{1,100})<\/title>/i.exec(c); if (m?.[1].trim()) return m[1].trim() }
-  if (f.language === 'markdown' || f.language === 'md') { const m = /^#{1,3}\s+(.{1,100})$/m.exec(c); if (m) return m[1].trim() }
-  return `Artifact ${n}`
+  if (f.attrs.title) { const t = f.attrs.title.replace(NAME_CTRL, ' ').trim().slice(0, 100); if (t) return { title: t, generic: false } }
+  if (f.language === 'html') { const m = /<title[^>]*>([^<]{1,100})<\/title>/i.exec(c); if (m?.[1].trim()) return { title: m[1].trim(), generic: false } }
+  if (f.language === 'markdown' || f.language === 'md') { const m = /^#{1,3}\s+(.{1,100})$/m.exec(c); if (m) return { title: m[1].trim(), generic: false } }
+  const t = artifactTypeFor(f.language)
+  return { title: t === 'html' ? 'HTML page' : t === 'svg' ? 'SVG image' : t === 'markdown' ? 'Markdown document' : `${LANG_NAMES[f.language] ?? (f.language ? f.language[0].toUpperCase() + f.language.slice(1) : 'Code')} snippet`, generic: true }
 }
 
 /**
  * Which fenced blocks become artifacts: an explicit title="..." attribute, an html/svg/markdown block of 3+ lines,
- * or any block of 8+ lines. Returns [{ title, language, type, content }] (at most LIMITS.artifactsPerMessage).
+ * or any block of 8+ lines. Returns [{ title, generic, language, type, content }] (at most LIMITS.artifactsPerMessage).
  */
 export function extractArtifacts(text) {
   const found = []
@@ -393,7 +398,7 @@ export function extractArtifacts(text) {
     const rich = ['html', 'svg', 'markdown', 'md'].includes(f.language)
     if (!f.attrs.title && !(rich && lines >= 3) && lines < 8) continue
     if (!f.content.trim() || Buffer.byteLength(f.content) > LIMITS.artifactBytes) continue
-    found.push({ title: guessTitle(f, found.length + 1), language: f.language || 'text', type: artifactTypeFor(f.language), content: f.content })
+    found.push({ ...guessTitle(f), language: f.language || 'text', type: artifactTypeFor(f.language), content: f.content })
     if (found.length >= LIMITS.artifactsPerMessage) break
   }
   return found
@@ -446,7 +451,8 @@ export function renderPrompt(content, values = {}) {
 
 /** Title from the first message: first line/sentence without markup, <= 50 chars at a word boundary. */
 export function heuristicTitle(text) {
-  let s = String(text ?? '').replace(/```[\s\S]*?(```|$)/g, ' ').replace(/[`*_#>~[\]]+/g, '').replace(/\s+/g, ' ').trim()
+  // drop markdown decoration (fences, `code` ticks, **bold**, __bold__, ~~strike~~, # headings, > quotes) but keep operators such as the * in "2 * 3"
+  let s = String(text ?? '').replace(/```[\s\S]*?(```|$)/g, ' ').replace(/`+|\*\*|__|~~/g, '').replace(/(^|\n)\s*[#>]+\s*/g, '$1').replace(/(^|\s)[*_](?=\S)|(?<=\S)[*_](?=\s|$)/g, '$1').replace(/[[\]]+/g, '').replace(/\s+/g, ' ').trim()
   if (!s) return 'New chat'
   const sentence = /^(.{8,}?[.!?])(\s|$)/.exec(s)
   if (sentence && sentence[1].length <= 80) s = sentence[1].replace(/[.!?]+$/, '')
@@ -504,35 +510,42 @@ export function parseQuery(q) {
   return { terms, phrases: phrases.filter(Boolean).slice(0, 4), exclude: exclude.slice(0, 8) }
 }
 
-/** In-memory BM25 inverted index over one user's messages. docId = message id. */
+/**
+ * In-memory BM25 inverted index over one user's messages (docId = message id).
+ * postings: term -> Map(docId -> term frequency); docs: docId -> { ...meta, len, terms[] } (terms lets remove() touch only that document's postings).
+ */
 export class SearchIndex {
-  constructor() { this.docs = new Map(); this.postings = new Map(); this.totalLen = 0 }
+  constructor() { this.docs = new Map(); this.postings = new Map(); this.totalLen = 0; this.postingCount = 0 }
   get size() { return this.docs.size }
   add(docId, meta, text) {
     this.remove(docId)
     const tf = new Map()
     let len = 0
-    for (const { term } of tokenize(text)) {
+    for (const { term } of tokenize(text.length > LIMITS.indexedCharsPerMessage ? text.slice(0, LIMITS.indexedCharsPerMessage) : text)) {
       len++
-      if (tf.size >= 3000 && !tf.has(term)) continue
+      if (tf.size >= LIMITS.indexedTermsPerMessage && !tf.has(term)) continue // one message cannot bloat the vocabulary
       tf.set(term, (tf.get(term) ?? 0) + 1)
     }
-    this.docs.set(docId, { ...meta, len, tf })
-    this.totalLen += len
-    for (const term of tf.keys()) {
+    const terms = []
+    for (const [term, n] of tf) {
       let p = this.postings.get(term)
-      if (!p) this.postings.set(term, (p = new Set()))
-      p.add(docId)
+      if (!p) this.postings.set(term, (p = new Map()))
+      p.set(docId, n)
+      terms.push(term)
     }
+    this.docs.set(docId, { ...meta, len, terms })
+    this.totalLen += len
+    this.postingCount += terms.length
   }
   remove(docId) {
     const d = this.docs.get(docId)
     if (!d) return
-    for (const term of d.tf.keys()) {
+    for (const term of d.terms) {
       const p = this.postings.get(term)
       if (p) { p.delete(docId); if (!p.size) this.postings.delete(term) }
     }
     this.totalLen -= d.len
+    this.postingCount -= d.terms.length
     this.docs.delete(docId)
   }
   removeWhere(pred) { for (const [id, d] of [...this.docs]) if (pred(d)) this.remove(id) }
@@ -544,7 +557,7 @@ export class SearchIndex {
   }
   /**
    * BM25 search. Every query term must occur in the message (the last term also matches as a prefix); when that finds nothing and
-   * there are several terms it falls back to "any term". Returns [{ docId, meta, score, matched: Set<term> }] best first.
+   * there are several terms it falls back to "any term". Returns { hits: [{ docId, meta, score, matched: Set<term> }] best first, mode }.
    */
   search(terms, { exclude = [], filter } = {}) {
     if (!terms.length || !this.docs.size) return { hits: [], mode: 'all' }
@@ -557,6 +570,7 @@ export class SearchIndex {
       if (i === terms.length - 1 && t.length >= 2) variants.push(...this.expand(t))
       return variants
     })
+    const excluded = exclude.map((x) => this.postings.get(x)).filter(Boolean)
     const run = (requireAll) => {
       const scores = new Map()
       const counts = new Map()
@@ -567,9 +581,8 @@ export class SearchIndex {
           const post = this.postings.get(term)
           if (!post) continue
           const idf = Math.log(1 + (N - post.size + 0.5) / (post.size + 0.5)) * (term === variants[0] ? 1 : 0.6)
-          for (const id of post) {
+          for (const [id, f] of post) {
             const d = this.docs.get(id)
-            const f = d.tf.get(term)
             const s = idf * ((f * (k1 + 1)) / (f + k1 * (1 - b + (b * d.len) / avg)))
             scores.set(id, (scores.get(id) ?? 0) + s)
             if (!seen.has(id)) { seen.add(id); counts.set(id, (counts.get(id) ?? 0) + 1) }
@@ -583,7 +596,7 @@ export class SearchIndex {
         if (requireAll && counts.get(id) < groups.length) continue
         const d = this.docs.get(id)
         if (filter && !filter(d)) continue
-        if (exclude.some((x) => d.tf.has(x))) continue
+        if (excluded.some((p) => p.has(id))) continue
         hits.push({ docId: id, meta: d, score: score * (counts.get(id) / groups.length), matched: matched.get(id) })
       }
       hits.sort((a, c) => c.score - a.score)
@@ -723,16 +736,13 @@ export function aiRoutes(r, db, ctx = {}) {
 
   ctx.events?.on?.('shutdown', () => { for (const g of inflight.values()) g.abort.abort() })
 
-  /* Scope rules and the preview frame CSP can only be registered once the security module has loaded (after this function), so do it lazily. */
-  let lateInit = false
-  ctx.hooks?.beforeRoute?.push(() => {
-    if (lateInit || !ctx.scopes?.register) return
-    try {
-      for (const p of ['/api/models', '/api/search', '/api/prompts']) ctx.scopes.register(p, 'ai')
-      ctx.csp?.add?.('frame-src', "'self'")
-      lateInit = true
-    } catch { /* optional hardening only */ }
-  })
+  /* API-key scope rules and the CSP widening for the sandboxed preview frame. The security module loads after this function runs, so we
+     queue (docs/security.md): its queues are plain arrays until it loads, then apply immediately. Both are optional hardening. */
+  try {
+    const scopeQ = (ctx.scopeRules ??= [])
+    for (const p of ['/api/models', '/api/search', '/api/prompts']) scopeQ.push([p, 'ai'])
+    ;(ctx.cspExtras ??= []).push(['frame-src', "'self'"])
+  } catch { /* ctx without queues: nothing to widen */ }
 
   /* ---------------------------------------------------------------------------- tools */
   function registerTool(def) {
@@ -897,24 +907,55 @@ export function aiRoutes(r, db, ctx = {}) {
   }
 
   /* ---------------------------------------------------------------------------- search index */
-  function userIndex(userId) {
-    let idx = indexes.get(userId)
-    if (idx) { indexes.delete(userId); indexes.set(userId, idx); return idx } // LRU touch
-    idx = new SearchIndex()
-    let budget = LIMITS.indexedMessagesPerUser
-    const convos = rowsBy('conversations', 'userId', userId).slice().sort((a, b) => ((b.lastMessageAt ?? b.createdAt) < (a.lastMessageAt ?? a.createdAt) ? -1 : 1))
-    outer: for (const c of convos) {
-      for (const m of rowsBy('messages', 'conversationId', c.id)) {
-        if (budget-- <= 0) { idx.partial = true; break outer }
-        if (m.status === 'streaming' || !m.content) continue
-        idx.add(m.id, { convId: c.id, role: m.role }, m.content)
-      }
+  const GLOBAL_POSTINGS = () => envInt('RD_AI_INDEX_MAX_POSTINGS', 6_000_000, 100, 200_000_000)
+  const USER_POSTINGS = () => envInt('RD_AI_INDEX_USER_POSTINGS', LIMITS.indexPostingsPerUser, 100, 200_000_000)
+  const tick = () => new Promise((r) => setImmediate(r))
+  /** Keep the sum of all users' indexes under the global budget by dropping least-recently-used ones (they are rebuilt on demand). */
+  function trimIndexes(keep) {
+    let total = 0
+    for (const i of indexes.values()) total += i.postingCount
+    const limit = GLOBAL_POSTINGS()
+    for (const [uid, i] of indexes) {
+      if (total <= limit) break
+      if (uid === keep) continue
+      total -= i.postingCount
+      i.evicted = true
+      indexes.delete(uid)
     }
-    indexes.set(userId, idx)
-    if (indexes.size > 50) indexes.delete(indexes.keys().next().value)
+  }
+  /**
+   * The user's search index, built lazily from their stored messages (newest chats first, up to a posting budget) in slices that yield
+   * to the event loop, so a big account never stalls other requests. `partial` is set when older messages did not fit.
+   */
+  async function ensureIndex(userId) {
+    let idx = indexes.get(userId)
+    if (idx) { indexes.delete(userId); indexes.set(userId, idx) } // LRU touch
+    else {
+      idx = new SearchIndex()
+      indexes.set(userId, idx) // registered first, so messages saved while it builds are indexed too
+      const mine = idx
+      idx.building = (async () => {
+        const convos = rowsBy('conversations', 'userId', userId).slice().sort((a, b) => ((b.lastMessageAt ?? b.createdAt) < (a.lastMessageAt ?? a.createdAt) ? -1 : 1))
+        let sliceStart = performance.now()
+        outer: for (const c of convos) {
+          for (const m of rowsBy('messages', 'conversationId', c.id).slice()) {
+            if (mine.postingCount >= USER_POSTINGS()) { mine.partial = true; break outer }
+            if (m.status === 'streaming' || !m.content) continue
+            mine.add(m.id, { convId: c.id, role: m.role }, m.content)
+            if (performance.now() - sliceStart > 8) { await tick(); sliceStart = performance.now(); if (mine.evicted) return }
+          }
+        }
+      })().finally(() => { mine.building = null; trimIndexes(userId) })
+    }
+    if (idx.building) await idx.building
     return idx
   }
-  const indexMessage = (userId, m) => { const idx = indexes.get(userId); if (idx && m.content) idx.add(m.id, { convId: m.conversationId, role: m.role }, m.content) }
+  const indexMessage = (userId, m) => {
+    const idx = indexes.get(userId)
+    if (!idx || !m.content) return
+    if (idx.postingCount >= USER_POSTINGS() * 1.1) { idx.partial = true; return }
+    idx.add(m.id, { convId: m.conversationId, role: m.role }, m.content)
+  }
   const unindexMessages = (userId, ids) => { const idx = indexes.get(userId); if (idx) for (const id of ids) idx.remove(id) }
 
   /* ---------------------------------------------------------------------------- views */
@@ -1140,7 +1181,7 @@ export function aiRoutes(r, db, ctx = {}) {
   promptRoutes('/api/ai/prompts')
 
   /* ---------------------------------------------------------------------------- search */
-  function search({ user, query }) {
+  async function search({ user, query }) {
     const q = String(query.get('q') ?? '').trim()
     if (!q) bad('Missing query parameter: q')
     if (q.length > 200) bad('Query is too long (max 200 characters)')
@@ -1153,7 +1194,8 @@ export function aiRoutes(r, db, ctx = {}) {
     if (!parsed.terms.length && !parsed.phrases.length) bad('Query has no searchable words')
     const convos = new Map(rowsBy('conversations', 'userId', user.id).map((c) => [c.id, c]))
     const allowed = (c) => c && (!projectId || c.projectId === projectId) && !(archived === '0' && c.archived)
-    const idx = userIndex(user.id)
+    let idx = await ensureIndex(user.id)
+    if (idx.evicted) idx = await ensureIndex(user.id) // another user's build pushed this one out mid-way: rebuild once
     const { hits, mode } = idx.search(parsed.terms, { exclude: parsed.exclude, filter: (d) => allowed(convos.get(d.convId)) })
     const byConv = new Map()
     for (const h of hits) {
@@ -1259,15 +1301,17 @@ export function aiRoutes(r, db, ctx = {}) {
     return parts.join('\n\n')
   }
 
-  function toProviderMessage(m) {
+  /** `lite` skips reading image blobs (token estimates charge a flat rate per image, so GET /conversations/:id need not base64 megabytes). */
+  function toProviderMessage(m, { lite = false } = {}) {
     if (m.role === 'assistant') return { role: 'assistant', content: m.content ?? '' }
     const blocks = []
     for (const a of m.attachments ?? []) {
       if (a.type === 'text') blocks.push({ type: 'text', text: `<attachment name="${attrEsc(a.name)}">\n${tagEsc(a.content ?? '', 'attachment')}\n</attachment>` })
       else if (a.type === 'image') {
         let buf = null
-        try { buf = a.blobId ? db.getBlob(a.blobId) : null } catch { buf = null }
-        if (buf) blocks.push({ type: 'image', source: { type: 'base64', media_type: a.mediaType, data: buf.toString('base64') } })
+        if (!lite) { try { buf = a.blobId ? db.getBlob(a.blobId) : null } catch { buf = null } }
+        if (lite) blocks.push({ type: 'image', source: { type: 'base64', media_type: a.mediaType, data: '' } })
+        else if (buf) blocks.push({ type: 'image', source: { type: 'base64', media_type: a.mediaType, data: buf.toString('base64') } })
         else blocks.push({ type: 'text', text: `[image "${attrEsc(a.name)}" is no longer available]` })
       }
     }
@@ -1376,7 +1420,15 @@ export function aiRoutes(r, db, ctx = {}) {
     const mine = rowsBy('artifacts', 'conversationId', convo.id)
     let total = null
     for (const f of extractArtifacts(text)) {
-      const existing = mine.find((a) => a.title.toLowerCase() === f.title.toLowerCase() && (a.type ?? artifactTypeFor(a.language)) === f.type)
+      // A repeated, explicit title means "revise this artifact". A made-up title ("Python snippet") never merges: it just gets a free number.
+      const existing = f.generic ? null : mine.find((a) => a.title.toLowerCase() === f.title.toLowerCase() && (a.type ?? artifactTypeFor(a.language)) === f.type)
+      if (f.generic) {
+        const same = mine.find((a) => a.content === f.content && (a.type ?? artifactTypeFor(a.language)) === f.type) // e.g. the same reply regenerated
+        if (same) { out.push({ action: 'unchanged', artifact: same }); continue }
+        let n = 1
+        const base = f.title
+        while (mine.some((a) => a.title.toLowerCase() === f.title.toLowerCase())) f.title = `${base} ${++n}`
+      }
       if (existing) {
         if (existing.content === f.content) { out.push({ action: 'unchanged', artifact: existing }); continue }
         const row = pushVersion(existing, { content: f.content, note: 'Updated by assistant', messageId: msgId })
@@ -1507,8 +1559,8 @@ export function aiRoutes(r, db, ctx = {}) {
   async function turn(rc, mode, forceStream = false) {
     const { req, res, user, params, query } = rc
     const streaming = forceStream || wantsStream(req, query)
+    let convo = ownRow('conversations', params.id, user, 'Conversation') // 404 before reading (up to 16 MB of) a body that is not ours to send
     const body = obj(readJson(await readBody(req, LIMITS.requestBytes)))
-    let convo = ownRow('conversations', params.id, user, 'Conversation')
     const blobsToDrop = []
     const cleanup = () => { for (const b of blobsToDrop) { try { db.deleteBlob(b) } catch { /* best effort */ } } }
     let released = false
@@ -1727,7 +1779,7 @@ export function aiRoutes(r, db, ctx = {}) {
     try {
       const model = modelFor(convo)
       const win = windowTokens(model)
-      const est = estimateTokens(systemFor({ convo, project, model, toolsOn: convo.tools !== false })) + estimateMessagesTokens(pathOf(tree, leafOf(tree)).map(toProviderMessage))
+      const est = estimateTokens(systemFor({ convo, project, model, toolsOn: convo.tools !== false })) + estimateMessagesTokens(pathOf(tree, leafOf(tree)).map((m) => toProviderMessage(m, { lite: true })))
       context = { estimatedTokens: est, contextWindow: win, model: model.id }
     } catch { /* estimate is advisory */ }
     return {

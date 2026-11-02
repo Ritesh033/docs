@@ -102,6 +102,14 @@ export async function register(r, db, ctx) {
       extraRules.push([prefix.replace(/\/+$/, ''), service])
     },
   }
+  // Code that runs before this module (core modules, or module files sorting before "security.js") cannot call ctx.scopes / ctx.csp yet.
+  // It queues what it needs instead: (ctx.scopeRules ??= []).push(['/api/widgets', 'compute']); (ctx.cspExtras ??= []).push(['frame-src', "'self'"]).
+  // The queues are applied now; afterwards pushing to them applies immediately.
+  const apply = (what, fn) => { try { fn() } catch (e) { console.error(`[rd-cloude] ${what} rejected:`, e.message) } }
+  for (const [prefix, service] of Array.isArray(ctx.scopeRules) ? ctx.scopeRules : []) apply(`scope rule ${prefix}`, () => ctx.scopes.register(prefix, service))
+  for (const [directive, ...values] of Array.isArray(ctx.cspExtras) ? ctx.cspExtras : []) apply(`CSP ${directive}`, () => csp.add(directive, ...values))
+  ctx.scopeRules = { push: (...rules) => rules.forEach(([prefix, service]) => apply(`scope rule ${prefix}`, () => ctx.scopes.register(prefix, service))) }
+  ctx.cspExtras = { push: (...extras) => extras.forEach(([directive, ...values]) => apply(`CSP ${directive}`, () => csp.add(directive, ...values))) }
   let earlyActive = false
 
   /* ------------------------------------------------------------- headers */
@@ -149,12 +157,19 @@ export async function register(r, db, ctx) {
     const { req, auth, route } = rc
     const hosts = allowedHosts()
     if (hosts.length && !hosts.includes(String(req.headers.host ?? '').toLowerCase())) throw new HttpError(421, 'Unrecognised host')
-    const len = Number(req.headers['content-length'] ?? 0)
-    if (len > MAX_AUTH_BODY && GUARDED.test(rc.url.pathname)) throw new HttpError(413, 'Payload too large for this endpoint')
+    if (GUARDED.test(rc.url.pathname)) {
+      // These endpoints take tiny JSON bodies. A declared length is checked here; a chunked body has no declared length, so it is refused.
+      const len = Number(req.headers['content-length'] ?? 0)
+      if (len > MAX_AUTH_BODY) throw new HttpError(413, 'Payload too large for this endpoint')
+      if (req.headers['content-length'] === undefined && /chunked/i.test(String(req.headers['transfer-encoding'] ?? ''))) throw new HttpError(411, 'Content-Length is required for this endpoint')
+    }
     if (auth?.via === 'apiKey') {
       if (route?.meta?.sessionOnly) throw new HttpError(403, 'This action requires an interactive session')
       if (auth.scopes) {
-        const need = requiredScope(req.method, rc.url.pathname, extraRules)
+        // Authenticated routes outside /api/ (a future module's own prefix) fall back to the global read/write scopes: fail closed.
+        const pathname = rc.url.pathname
+        const need = requiredScope(req.method, pathname, extraRules)
+          ?? (route && !route.public && !pathname.startsWith('/api/') ? { service: null, level: req.method === 'GET' || req.method === 'HEAD' ? 'read' : 'write' } : null)
         if (need && !scopeAllows(auth.scopes, need)) {
           const want = need.service ? `${need.service}${need.level === 'read' ? ':read' : ''}` : need.level
           throw new HttpError(403, `API key scope insufficient: this endpoint needs "${want}"${need.service ? ` (or "${need.level}")` : ''}`)
@@ -203,8 +218,14 @@ export async function register(r, db, ctx) {
     method: '*', pattern: '/api/*unmatched', public: true, optionalAuth: false, raw: false, stream: true, meta: null,
     handler() { throw new HttpError(404, 'Not found') },
   }
+  const badPath = {
+    method: '*', pattern: '/*badpath', public: true, optionalAuth: false, raw: false, stream: true, meta: null,
+    handler() { throw new HttpError(400, 'Malformed URL encoding') },
+  }
   const origMatch = r.match.bind(r)
   r.match = (method, pathname) => {
+    // Router.match and the static file handler decodeURIComponent() the path; "%E0%A4%A" would surface as a 500 with a stack trace in the log.
+    if (pathname.includes('%')) { try { decodeURIComponent(pathname) } catch { return { route: badPath, params: {} } } }
     const m = origMatch(method, pathname)
     if (m) return m
     if (method === 'OPTIONS') return { route: preflight, params: {} }
@@ -272,10 +293,34 @@ export async function register(r, db, ctx) {
     return { binary: Buffer.from(JSON.stringify(data, null, 2)), type: 'application/json; charset=utf-8', filename: `rd-cloude-export-${day}.json` }
   }, { meta: { summary: 'Download all your data as JSON' } })
 
-  function deleteBlobs(row) {
-    for (const id of [row.blobId, ...(row.blobIds ?? []), ...(row.versions ?? []).map((v) => v?.blobId)]) {
-      if (typeof id === 'string') { try { db.deleteBlob(id) } catch { /* best effort */ } }
+  /**
+   * Blob ids a row points at: any property named blobId / blobIds / blob / thumbBlobId ... (string or array of strings),
+   * found in nested objects and arrays (versions[], parts[], ...) up to a small depth.
+   */
+  const BLOB_KEY = /^(blob|blobs|blobIds?|blobKeys?|[A-Za-z]+BlobIds?)$/
+  function blobIdsOf(v, out = new Set(), depth = 0) {
+    if (depth > 5 || v === null || typeof v !== 'object') return out
+    if (Array.isArray(v)) { for (const x of v.slice(0, 5000)) blobIdsOf(x, out, depth + 1); return out }
+    for (const [k, x] of Object.entries(v)) {
+      if (BLOB_KEY.test(k) && typeof x === 'string') out.add(x)
+      else if (BLOB_KEY.test(k) && Array.isArray(x)) { for (const y of x.slice(0, 5000)) if (typeof y === 'string') out.add(y) }
+      else if (x && typeof x === 'object') blobIdsOf(x, out, depth + 1)
     }
+    return out
+  }
+  /** Delete the blobs of removed rows, except any blob that a surviving row (any user, any collection) still references (dedup / sharing). */
+  function deleteBlobsOf(rowsRemoved) {
+    const doomed = new Set()
+    for (const row of rowsRemoved) blobIdsOf(row, doomed)
+    if (!doomed.size) return
+    for (const col of db.collections?.() ?? CORE_COLLECTIONS) {
+      if (!doomed.size) break
+      for (const row of db.find(col, () => true)) {
+        for (const id of blobIdsOf(row)) doomed.delete(id)
+        if (!doomed.size) break
+      }
+    }
+    for (const id of doomed) { try { db.deleteBlob(id) } catch { /* best effort: the blob store reports its own problems */ } }
   }
 
   r.delete('/api/account', async (rc) => {
@@ -305,7 +350,7 @@ export async function register(r, db, ctx) {
       for (const col of ['sessions', 'apiKeys', 'auth_tokens']) for (const x of many(db, col, 'userId', u.id)) db.remove(col, x.id)
       db.remove('users', u.id)
     })
-    for (const list of Object.values(rows)) for (const x of list) if (!kept.has(x)) deleteBlobs(x)
+    deleteBlobsOf(Object.values(rows).flat().filter((x) => !kept.has(x)))
     ctx.events.emit('account.deleted', { userId: u.id, email: u.email })
     return { ok: true }
   }, { meta: { summary: 'Delete the account and all its data (password confirmation)', sessionOnly: true } })
@@ -315,7 +360,15 @@ export async function register(r, db, ctx) {
 <html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">
 <title>RD Cloude account</title><link rel="icon" href="data:,"><link rel="stylesheet" href="/style.css"><link rel="stylesheet" href="/ui/security.css"></head>
 <body><main id="root" class="sec-page"></main><script type="module" src="/auth/account.js"></script></body></html>`
-  const PAGE_JS = "import { lib } from '/lib.js'\nimport { mountAccountPage } from '/ui/security.js'\nmountAccountPage(document.getElementById('root'), lib)\n"
+  // a second link opened in the same tab only changes the hash, so the page re-mounts itself on hashchange
+  const PAGE_JS = [
+    "import { lib } from '/lib.js'",
+    "import { mountAccountPage } from '/ui/security.js'",
+    "const root = document.getElementById('root')",
+    'mountAccountPage(root, lib)',
+    "addEventListener('hashchange', () => { if (location.hash.length > 1) mountAccountPage(root, lib) })",
+    '',
+  ].join('\n')
   r.get('/auth/account', () => ({ text: PAGE, type: 'text/html; charset=utf-8' }), { public: true })
   r.get('/auth/account.js', () => ({ text: PAGE_JS, type: 'text/javascript; charset=utf-8' }), { public: true })
 

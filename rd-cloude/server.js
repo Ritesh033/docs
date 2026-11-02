@@ -80,7 +80,7 @@ export function parseConfig(env = process.env) {
   else if (['1', 'true', 'yes', 'on'].includes(crash)) cfg.crashOnUnhandled = true
   else problems.push(`RD_CRASH_ON_UNHANDLED must be 1 or 0 (got "${env.RD_CRASH_ON_UNHANDLED}")`)
 
-  try { resolveDbConfig() } catch (e) { problems.push(e.message) } // storage engine tuning variables
+  try { resolveDbConfig({}, env) } catch (e) { problems.push(e.message) } // storage engine tuning variables (RD_FSYNC, ...)
 
   if (problems.length) throw new ConfigError(problems)
   return cfg

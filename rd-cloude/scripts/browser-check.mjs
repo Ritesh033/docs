@@ -20,6 +20,7 @@ await page.fill('[name=email]', `bc${Date.now()}@rd.dev`)
 await page.fill('[name=password]', 'password123')
 await page.click('button[type=submit]')
 await page.waitForSelector('#app:not([hidden])', { timeout: 10000 })
+await page.waitForSelector('#nav a', { timeout: 10000 }).catch(() => problems.push('nav never rendered any links'))
 const navLinks = await page.$$eval('#nav a', (as) => as.map((a) => a.hash))
 console.log('nav:', navLinks.join(' '))
 for (const h of hashes.length ? hashes : navLinks) {
