@@ -1325,9 +1325,10 @@ test('the HTML fallback switches itself off once the app calls the early hook (h
     const before = await app.call('GET', '/')
     assert.match(before.headers.get('content-security-policy'), /script-src 'self'/, 'documents carry the CSP either way')
     const headers = {}
-    const res = { headersSent: false, setHeader: (k, v) => { headers[k.toLowerCase()] = v }, getHeader: (k) => headers[k.toLowerCase()] }
-    assert.equal(app.ctx.hooks.onRequest.length, 1)
-    app.ctx.hooks.onRequest[0]({ req: { headers: { origin: 'https://nope.example' }, socket: {} }, res, url: new URL('http://x/'), requestId: 'short id with spaces', route: null })
+    const res = { headersSent: false, setHeader: (k, v) => { headers[k.toLowerCase()] = v }, getHeader: (k) => headers[k.toLowerCase()], once() {} }
+    assert.ok(app.ctx.hooks.onRequest.length >= 1)
+    // other modules (observability) register early hooks too: run all of them, as app.js does
+    for (const fn of app.ctx.hooks.onRequest) { try { fn({ req: { headers: { origin: 'https://nope.example' }, socket: {} }, res, url: new URL('http://x/'), requestId: 'short id with spaces', route: null }) } catch { /* hooks must not break the others */ } }
     assert.match(headers['content-security-policy'], /script-src 'self'/, 'the early hook sets the headers itself')
     assert.match(res.requestId ?? headers['x-request-id'], /^[0-9a-f-]{36}$/, 'unsafe ids are replaced')
     assert.equal(headers['access-control-allow-origin'], undefined)

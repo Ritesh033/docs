@@ -13,6 +13,7 @@ import { fileURLToPath } from 'node:url'
 import { HttpError, required } from '../http.js'
 import { record } from '../billing.js'
 import { deriveKey } from '../auth.js'
+import { isPrivateIp } from '../ssrf.js'
 
 const RUNNER = path.join(path.dirname(fileURLToPath(import.meta.url)), '..', 'functions-runner.js')
 const envInt = (name, dflt, min, max) => { const n = Number(process.env[name]); return Number.isFinite(n) && n >= min && n <= max ? Math.floor(n) : dflt }
@@ -76,22 +77,8 @@ export function nextCron(spec, afterMs) {
   return null
 }
 
-/* ------------------------------------------------------------------ SSRF-safe fetch (parent side) */
-function v4Private(a, b) {
-  return a === 0 || a === 10 || a === 127 || (a === 100 && b >= 64 && b <= 127) || (a === 169 && b === 254) || (a === 172 && b >= 16 && b <= 31) || (a === 192 && b === 168) || (a === 192 && b === 0) || (a === 198 && (b === 18 || b === 19)) || a >= 224
-}
-export function isPrivateIp(ip) {
-  if (net.isIPv4(ip)) { const [a, b, c] = ip.split('.').map(Number); return v4Private(a, b) || (a === 192 && b === 0 && c === 2) || (a === 198 && b === 51 && c === 100) || (a === 203 && b === 0 && c === 113) }
-  if (net.isIPv6(ip)) {
-    const l = ip.toLowerCase()
-    const mapped = /^(?:::ffff:|::)(\d+\.\d+\.\d+\.\d+)$/.exec(l) ?? /^64:ff9b::(\d+\.\d+\.\d+\.\d+)$/.exec(l)
-    if (mapped) return isPrivateIp(mapped[1])
-    const hex = /^::ffff:([0-9a-f]{1,4}):([0-9a-f]{1,4})$/.exec(l)
-    if (hex) { const n = (parseInt(hex[1], 16) << 16) | parseInt(hex[2], 16); return isPrivateIp([(n >>> 24) & 255, (n >>> 16) & 255, (n >>> 8) & 255, n & 255].join('.')) }
-    return l === '::' || l === '::1' || /^f[cd]/.test(l) || /^fe[89ab]/.test(l) || l.startsWith('ff') || l.startsWith('2001:db8') || l.startsWith('100::')
-  }
-  return true
-}
+/* ------------------------------------------------------------------ SSRF-safe fetch (parent side); isPrivateIp lives in ../ssrf.js */
+export { isPrivateIp }
 function hostAllowed(host, allowed) {
   const h = host.toLowerCase()
   return allowed.some((a) => { const x = a.toLowerCase(); return x.startsWith('*.') ? h.endsWith(x.slice(1)) && h.length > x.length - 1 : x === h })
