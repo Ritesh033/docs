@@ -8,9 +8,9 @@ export async function startTestApp(opts = {}) {
   const base = `http://localhost:${server.address().port}`
 
   /** call(method, path, {body, raw, headers, token}) -> {status, headers, data}; data is parsed JSON, text for text/*, else Buffer. */
-  async function call(method, path, { body, raw, headers = {}, token } = {}) {
+  async function call(method, path, { body, raw, headers = {}, token, redirect } = {}) {
     const res = await fetch(base + path, {
-      method,
+      method, redirect,
       headers: { ...(token ? { authorization: `Bearer ${token}` } : {}), ...(body !== undefined ? { 'content-type': 'application/json' } : {}), ...headers },
       body: raw ?? (body !== undefined ? JSON.stringify(body) : undefined),
     })
